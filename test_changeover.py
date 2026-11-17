@@ -4,7 +4,8 @@
 test_changeover.py -- a hypothetical scenario: every currency of the basket is
 converted into one successor unit on one date (a "whole-basket successor
 event"). The tests pin the declared-numeraire readout, the frozen record, the
-resolver rule and the independent recomputation.
+resolver rule, the information-only rate comparison and the independent
+recomputation.
 
 Framing (read first):
   - This is a hypothetical scenario, a thought experiment. It is not a
@@ -2099,6 +2100,36 @@ def test_a_nominal_sibling_pins_the_same_quantities_as_a_ppp_vintage():
     assert verify_independent.compare_frozen_record(sibling, ev, rec) == []
 
 
+def test_ppp_and_population_inputs_are_resolved_without_the_event():
+    """PPP factors and populations are not FX-leg inputs: resolved without
+    the event, a factor observed before it stays usable within its maximum
+    age (1096 days from 1 July of its reference year), then it is too old.
+    The resolver cannot tell what a series measures: given the event, it
+    refuses every input on or after the date, so the caller passes the event
+    for FX-leg inputs only."""
+    ppp_age = worldyard.DECLARED_MAX_AGE_DAYS["World Bank PA.NUS.PPP"]
+    pop_age = worldyard.DECLARED_MAX_AGE_DAYS["UN World Population Prospects"]
+    assert ppp_age == 1096 and pop_age == 1461
+    factor = {"observations": [{"date": "2099-07-01", "value": "4"}]}
+    population = {"observations": [{"date": "2099-07-11", "value": "100"}]}
+    after = worldyard.resolve_input("2100-06-30", factor, ppp_age)
+    assert (after["state"], after["value"], after["age_days"]) == \
+        ("stale", "4", "364")
+    last = worldyard.resolve_input("2102-07-02", factor, ppp_age)
+    assert (last["state"], last["age_days"]) == ("stale", "1096")
+    late = worldyard.resolve_input("2102-07-03", factor, ppp_age)
+    assert (late["state"], late["reason"]) == ("unavailable", "TOO_OLD")
+    pop = worldyard.resolve_input("2100-06-30", population, pop_age)
+    assert (pop["state"], pop["value"]) == ("stale", "100")
+    for series, age in ((factor, ppp_age), (population, pop_age)):
+        assert worldyard.resolve_input("2100-06-30", series, age,
+                                       changeover=EVENT) == FROZEN_RESULT
+        # before the date the event changes nothing
+        assert worldyard.resolve_input("2099-12-31", series, age,
+                                       changeover=EVENT) == \
+            worldyard.resolve_input("2099-12-31", series, age)
+
+
 # --- nothing depends on the caller's decimal context ----------------------------
 def _hostile_context():
     """A caller's decimal context that differs from the library's in every
@@ -2187,6 +2218,740 @@ def test_results_do_not_depend_on_the_callers_decimal_context():
     # and the caller's context is left exactly as it was
     assert decimal.getcontext().prec == saved.prec
     assert decimal.getcontext().capitals == saved.capitals
+
+
+# --- rate comparison (information only) ------------------------------------------
+# The declared rates of the event set beside pinned market rates and PPP
+# factors, as ratios. It compares; it does not grade. No column is a
+# conversion rate, and a PPP factor is not an exchange rate.
+#
+# Pinned comparison inputs (illustrative, not real data).
+MARKET = {"source": "illustrative test values, not real market rates",
+          "date": "2099-12-31", "numeraire": "USD",
+          "usd_per_unit": {"USD": "1", "EUR": "1.25", "CNY": "0.1",
+                           "JPY": "0.00625", "GBP": "1.25", "INR": "0.0125"}}
+PPP = {"source": "illustrative test values, not World Bank data",
+       "reference_year": "2099",
+       "lcu_per_intl_usd": {"USD": "1", "EUR": "0.8", "CNY": "4",
+                            "JPY": "100", "GBP": "0.64", "INR": "25"}}
+
+RATE_NOTICE = (
+    "Information only. Hypothetical scenario: a thought experiment, not a "
+    "forecast, a proposal or an offer of any currency. "
+    "declared_implied_usd_per_unit is a comparison quantity derived from two "
+    "declared rates; it is not a conversion rate and must not be used to "
+    "convert amounts. A PPP factor is not an exchange rate: no column shows a "
+    "correct rate, or that a currency is over- or undervalued.")
+
+# declared-implied USD per unit = units_per_successor(USD) / units_per_successor(i)
+# declared_over_market = implied / market        declared_over_ppp = implied * factor
+EXPECTED_ROWS = {
+    #       implied        /market    /ppp
+    "CNY": ("0.125",      "1.25",    "0.5"),
+    "EUR": ("1.25",       "1",       "1"),
+    "GBP": ("1.5625",     "1.25",    "1"),
+    "INR": ("0.0125",     "1",       "0.3125"),
+    "JPY": ("0.00625",    "1",       "0.625"),
+    "USD": ("1",          "1",       "1"),
+}
+RATE_RECORD_HASH = ("sha256:946bced6f1f9672d248f2faae6a050f24b4fd6f466b7bdae"
+                    "5959887449299145")
+RATE_ROW_KEYS = sorted([
+    "code", "declared_units_per_successor", "declared_implied_usd_per_unit",
+    "market_usd_per_unit", "declared_over_market", "ppp_lcu_per_intl_usd",
+    "declared_over_ppp", "flags"])
+
+
+def _keys(obj):
+    """Every key of a JSON value, recursively."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            yield k
+            yield from _keys(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _keys(v)
+
+
+def _both_rate_comparisons(event, market, ppp):
+    """The engine's record and the independent verifier's recomputation,
+    which must be equal; returns the engine's."""
+    rec = worldyard.rate_comparison(event, market, ppp)
+    assert verify_independent.recompute_rate_comparison(event, market,
+                                                        ppp) == rec
+    return rec
+
+
+def test_rate_comparison_is_information_only_and_exact():
+    rec = _both_rate_comparisons(EVENT, MARKET, PPP)
+
+    assert sorted(rec) == sorted([
+        "format", "kind", "information_only", "scenario", "notice",
+        "event_id", "event_hash", "successor", "successor_kind", "effective",
+        "market", "ppp", "rows", "record_hash"])
+    assert rec["format"] == "worldyard-rate-comparison-1"
+    assert rec["format"] == worldyard.RATE_COMPARISON_FORMAT
+    assert rec["kind"] == "rate_comparison"
+    assert rec["information_only"] is True
+    assert rec["scenario"] == "hypothetical"
+    assert rec["notice"] == RATE_NOTICE == worldyard.RATE_NOTICE
+    assert rec["notice"] == verify_independent.RATE_COMPARISON_NOTICE
+    assert "not an exchange rate" in rec["notice"].lower()
+    assert "not a conversion rate" in rec["notice"].lower()
+    assert rec["event_id"] == EVENT["id"]
+    assert rec["event_hash"] == worldyard.sha256(EVENT) == EVENT_HASH
+    assert rec["successor"] == "W" and rec["effective"] == "2100-01-01"
+    assert rec["successor_kind"] == "fictional_scenario_identifier"
+    # it compares; it does not grade: no audit or fairness vocabulary, and
+    # no key that would present a column as a conversion or exchange rate
+    assert not any(w in k.lower() for k in _keys(rec)
+                   for w in ("audit", "fair", "score", "grade",
+                             "conversion", "exchange"))
+    # the pinned inputs are named
+    assert rec["market"] == {"source": MARKET["source"], "date": "2099-12-31",
+                             "numeraire": "USD"}
+    assert rec["ppp"] == {"source": PPP["source"], "reference_year": "2099"}
+
+    rows = rec["rows"]
+    assert [r["code"] for r in rows] == sorted(EXPECTED_ROWS)
+    for r in rows:
+        c = r["code"]
+        implied, over_market, over_ppp = EXPECTED_ROWS[c]
+        assert sorted(r) == RATE_ROW_KEYS
+        # inputs echoed verbatim ...
+        assert r["declared_units_per_successor"] == EVENT["units_per_successor"][c]
+        assert r["market_usd_per_unit"] == MARKET["usd_per_unit"][c]
+        assert r["ppp_lcu_per_intl_usd"] == PPP["lcu_per_intl_usd"][c]
+        # ... and the comparisons, exact, in the shortest form
+        assert r["declared_implied_usd_per_unit"] == implied
+        assert r["declared_over_market"] == over_market
+        assert r["declared_over_ppp"] == over_ppp
+        assert r["flags"] == []
+
+    # deterministic, independent of input order, self-hashed, plain JSON
+    shuffled = copy.deepcopy(EVENT)
+    shuffled["units_per_successor"] = dict(
+        reversed(list(shuffled["units_per_successor"].items())))
+    market = copy.deepcopy(MARKET)
+    market["usd_per_unit"] = dict(
+        reversed(list(market["usd_per_unit"].items())))
+    assert worldyard.rate_comparison(shuffled, market, PPP) == rec
+    assert worldyard.rate_comparison(EVENT, MARKET, PPP) == rec
+    assert _self_hash_ok(rec, "record_hash")
+    assert rec["record_hash"] == RATE_RECORD_HASH
+    assert json.loads(json.dumps(rec)) == rec
+
+
+def test_rate_comparison_missing_rate_is_explicit_never_guessed():
+    market = copy.deepcopy(MARKET)
+    del market["usd_per_unit"]["JPY"]
+    rec = _both_rate_comparisons(EVENT, market, PPP)
+    jpy = [r for r in rec["rows"] if r["code"] == "JPY"][0]
+    assert jpy["market_usd_per_unit"] is None
+    assert jpy["declared_over_market"] is None
+    assert jpy["flags"] == ["NO_MARKET_RATE"]
+    # the PPP comparison for JPY is still made; the other rows are unchanged
+    assert jpy["declared_over_ppp"] == "0.625"
+    full = worldyard.rate_comparison(EVENT, MARKET, PPP)
+    assert [r for r in rec["rows"] if r["code"] != "JPY"] == \
+        [r for r in full["rows"] if r["code"] != "JPY"]
+    ppp = copy.deepcopy(PPP)
+    del ppp["lcu_per_intl_usd"]["CNY"]
+    del ppp["lcu_per_intl_usd"]["JPY"]
+    rec = _both_rate_comparisons(EVENT, market, ppp)
+    by = {r["code"]: r for r in rec["rows"]}
+    assert by["JPY"]["flags"] == ["NO_MARKET_RATE", "NO_PPP_FACTOR"]
+    assert by["JPY"]["declared_over_ppp"] is None
+    assert by["JPY"]["ppp_lcu_per_intl_usd"] is None
+    assert by["JPY"]["declared_implied_usd_per_unit"] == "0.00625"
+    assert by["CNY"]["flags"] == ["NO_PPP_FACTOR"]
+    assert by["CNY"]["declared_over_market"] == "1.25"
+    # every row keeps its eight keys, nulls included
+    assert all(sorted(r) == RATE_ROW_KEYS for r in rec["rows"])
+    empty = _both_rate_comparisons(
+        EVENT, dict(MARKET, usd_per_unit={}), dict(PPP, lcu_per_intl_usd={}))
+    assert all(r["flags"] == ["NO_MARKET_RATE", "NO_PPP_FACTOR"]
+               for r in empty["rows"])
+    assert [r["declared_implied_usd_per_unit"] for r in empty["rows"]] == \
+        [EXPECTED_ROWS[c][0] for c in sorted(EXPECTED_ROWS)]
+
+
+def test_rate_comparison_rounds_each_column_once_from_exact_values():
+    rec = _both_rate_comparisons(EVENT_SIX, MARKET, PPP)
+    u = {c: Fraction(v) for c, v in EVENT_SIX["units_per_successor"].items()}
+    for r in rec["rows"]:
+        c = r["code"]
+        implied = u["USD"] / u[c]
+        market = Fraction(MARKET["usd_per_unit"][c])
+        factor = Fraction(PPP["lcu_per_intl_usd"][c])
+        assert r["declared_implied_usd_per_unit"] == _round50_text(implied)
+        assert r["declared_over_market"] == _round50_text(implied / market)
+        assert r["declared_over_ppp"] == _round50_text(implied * factor)
+    cny = [r for r in rec["rows"] if r["code"] == "CNY"][0]
+    assert cny["declared_implied_usd_per_unit"] == \
+        "0.29816436138344434162605170765766658485236074925643"
+    assert cny["declared_over_market"] == \
+        "2.9816436138344434162605170765766658485236074925643"
+    assert cny["declared_over_ppp"] == \
+        "1.1926574455337773665042068306306663394094429970257"
+    # a column computed from the already rounded implied column would give
+    # other last digits (the case pinned here: GBP at a market rate of 1.25
+    # and a factor of 0.64)
+    gbp = [r for r in rec["rows"] if r["code"] == "GBP"][0]
+    implied = _round50(u["USD"] / u["GBP"])
+    assert gbp["declared_implied_usd_per_unit"] == \
+        "0.14213570925052506122686278642180766407709134248527"
+    assert gbp["declared_over_market"] == \
+        "0.11370856740042004898149022913744613126167307398821"
+    assert _round50_text(implied / Fraction("1.25")) == \
+        "0.11370856740042004898149022913744613126167307398822"
+    assert gbp["declared_over_ppp"] == \
+        "0.090966853920336039185192183309956905009338459190570"
+    assert _round50_text(implied * Fraction("0.64")) == \
+        "0.090966853920336039185192183309956905009338459190573"
+    assert verify_independent.compare_rate_comparison(
+        EVENT_SIX, MARKET, PPP, rec) == []
+
+
+def test_rate_comparison_ties_round_to_even():
+    """Half-way cases at the 51st significant digit, through the public
+    function: the kept digit 0 stays, 1 goes up to 2, 2 stays."""
+    cases = [("1." + "0" * 49 + "5", "1." + "0" * 49),        # 0 stays
+             ("1." + "0" * 48 + "15", "1." + "0" * 48 + "2"),  # 1 -> 2
+             ("1." + "0" * 48 + "25", "1." + "0" * 48 + "2")]  # 2 stays
+    for usd, want in cases:
+        assert len(usd) == 52 and len(want) == 51, (usd, want)
+        event = dict(EVENT, units_per_successor={"USD": usd, "EUR": "1"})
+        rec = _both_rate_comparisons(
+            event, dict(MARKET, usd_per_unit={"USD": "1", "EUR": "1"}),
+            dict(PPP, lcu_per_intl_usd={"USD": "1", "EUR": "1"}))
+        eur, us = rec["rows"]
+        assert eur["code"] == "EUR" and us["code"] == "USD"
+        assert eur["declared_implied_usd_per_unit"] == want, usd
+        assert eur["declared_over_market"] == want, usd
+        assert eur["declared_over_ppp"] == want, usd
+        assert want == _round50_text(Fraction(usd))
+        assert us["declared_implied_usd_per_unit"] == "1"
+
+
+def test_the_text_of_a_table_value_is_part_of_the_identity():
+    """A table value is echoed verbatim: another text for the same value
+    gives the same ratios and another record hash. A USD entry may be any
+    text of the value 1."""
+    base = worldyard.rate_comparison(EVENT, MARKET, PPP)
+    for usd_text in ("1.0", "01", "1.000"):
+        for eur_text in ("1.250", "01.25"):
+            market = copy.deepcopy(MARKET)
+            market["usd_per_unit"]["USD"] = usd_text
+            market["usd_per_unit"]["EUR"] = eur_text
+            rec = _both_rate_comparisons(EVENT, market, PPP)
+            by = {r["code"]: r for r in rec["rows"]}
+            assert by["USD"]["market_usd_per_unit"] == usd_text
+            assert by["EUR"]["market_usd_per_unit"] == eur_text
+            assert by["EUR"]["declared_over_market"] == "1"
+            assert [r["declared_over_market"] for r in rec["rows"]] == \
+                [r["declared_over_market"] for r in base["rows"]]
+            assert rec["record_hash"] != base["record_hash"]
+            # the published record is checked against its own inputs only
+            assert verify_independent.compare_rate_comparison(
+                EVENT, market, PPP, rec) == []
+            assert verify_independent.compare_rate_comparison(
+                EVENT, MARKET, PPP, rec) != []
+
+
+BAD_TABLE_VALUES = ("0", "0.000", "-1", "+1", "1e2", "1E+2", " 1.25", "1.25 ",
+                    ".5", "5.", "1_0", "1,25", "١", "１.２５",
+                    "", "1.2.5", "Infinity", "NaN", "1" * 81, None, True,
+                    1.25, 1, ["1.25"], {"v": "1.25"})
+
+
+def test_rate_comparison_rejects_malformed_requests():
+    def m(**kw):
+        return dict(copy.deepcopy(MARKET), **kw)
+
+    def p(**kw):
+        return dict(copy.deepcopy(PPP), **kw)
+
+    def m_rate(code, value):
+        return m(usd_per_unit=dict(MARKET["usd_per_unit"], **{code: value}))
+
+    def p_factor(code, value):
+        return p(lcu_per_intl_usd=dict(PPP["lcu_per_intl_usd"],
+                                       **{code: value}))
+
+    no_usd = copy.deepcopy(EVENT)
+    del no_usd["units_per_successor"]["USD"]
+    bad = [
+        (EVENT, m(numeraire="EUR"), PPP),              # the anchor is USD
+        (EVENT, m(numeraire="usd"), PPP),
+        (EVENT, m(numeraire=["USD"]), PPP),
+        (no_usd, MARKET, PPP),                         # no declared USD rate
+        (EVENT, m(date="2100-01-01"), PPP),            # not before the event
+        (EVENT, m(date="2150-06-30"), PPP),
+        (EVENT, m(date="2099-12-32"), PPP),
+        (EVENT, m(date="2099-12-31 "), PPP),
+        (EVENT, m(date=20991231), PPP),
+        (EVENT, m(date=None), PPP),
+        (EVENT, MARKET, p(reference_year="2100")),     # 1 July 2100 is later
+        (EVENT, MARKET, p(reference_year="99")),
+        (EVENT, MARKET, p(reference_year=2099)),
+        (EVENT, MARKET, p(reference_year="0000")),
+        (EVENT, MARKET, p(reference_year="20 9")),
+        (EVENT, MARKET, p(reference_year="２０９９")),
+        (EVENT, MARKET, p(reference_year="2099-07-01")),
+        (EVENT, m_rate("XYZ", "1"), PPP),              # not an event code
+        (EVENT, m_rate("W", "1"), PPP),                # the successor itself
+        (EVENT, MARKET, p_factor("XYZ", "1")),
+        (EVENT, m(usd_per_unit={1: "1"}), PPP),
+        (EVENT, m(usd_per_unit=dict(MARKET["usd_per_unit"], USD="1.01")), PPP),
+        (EVENT, MARKET, p(lcu_per_intl_usd=dict(PPP["lcu_per_intl_usd"],
+                                                 USD="2"))),
+        (EVENT, m(usd_per_unit=None), PPP),
+        (EVENT, m(usd_per_unit=[["EUR", "1.25"]]), PPP),
+        (EVENT, MARKET, p(lcu_per_intl_usd="4")),
+        (EVENT, m(source=""), PPP),
+        (EVENT, m(source=5), PPP),
+        (EVENT, MARKET, p(source="")),
+        (EVENT, MARKET, p(source=None)),
+        (EVENT, m(note="x"), PPP),                     # unknown key
+        (EVENT, {k: v for k, v in MARKET.items() if k != "date"}, PPP),
+        (EVENT, MARKET, p(note="x")),
+        (EVENT, MARKET, {k: v for k, v in PPP.items() if k != "source"}),
+        (EVENT, None, PPP),
+        (EVENT, MARKET, None),
+        (EVENT, [MARKET], PPP),
+        (EVENT, MARKET, "ppp"),
+        (dict(EVENT, scenario="real"), MARKET, PPP),
+        (dict(EVENT, successor="WLD"), MARKET, PPP),
+        (dict(EVENT, units_per_successor={}), MARKET, PPP),
+        (dict(EVENT, declaration={"text": {1, 2}}), MARKET, PPP),
+        (None, MARKET, PPP),
+        # no USD anywhere: refused as such, not by a table's USD entry
+        (no_usd, {k: (v if k != "usd_per_unit" else
+                      {c: r for c, r in v.items() if c != "USD"})
+                  for k, v in MARKET.items()},
+         {k: (v if k != "lcu_per_intl_usd" else
+              {c: r for c, r in v.items() if c != "USD"})
+          for k, v in PPP.items()}),
+        # 1 July of the reference year ON the effective date is not before it
+        (dict(EVENT, effective="2100-07-01"), MARKET,
+         p(reference_year="2100")),
+        (dict(EVENT, effective="2100-07-01"), m(date="2100-07-01"), PPP),
+    ]
+    for value in BAD_TABLE_VALUES:
+        bad.append((EVENT, m_rate("EUR", value), PPP))
+        bad.append((EVENT, MARKET, p_factor("CNY", value)))
+    good = worldyard.rate_comparison(EVENT, MARKET, PPP)
+    for args in bad:
+        assert _raises_value_error(worldyard.rate_comparison, *args), args[1:]
+        assert _raises_value_error(
+            verify_independent.recompute_rate_comparison, *args), args[1:]
+        # a malformed request is an error, never a difference
+        assert _raises_value_error(
+            verify_independent.compare_rate_comparison, *(args + (good,))), \
+            args[1:]
+    assert len(bad) == 46 + 2 * len(BAD_TABLE_VALUES)
+    # the day before is accepted
+    _both_rate_comparisons(dict(EVENT, effective="2100-07-02"), MARKET,
+                           p(reference_year="2100"))
+    _both_rate_comparisons(dict(EVENT, effective="2100-07-02"),
+                           m(date="2100-07-01"), PPP)
+
+
+def test_independent_verifier_recomputes_the_rate_comparison():
+    for event in (EVENT, EVENT_SIX, EVENT_AWKWARD):
+        rec = worldyard.rate_comparison(event, MARKET, PPP)
+        assert verify_independent.recompute_rate_comparison(
+            event, MARKET, PPP) == rec
+        assert verify_independent.compare_rate_comparison(
+            event, MARKET, PPP, rec) == []
+        paths = list(_leaf_paths(rec))
+        assert len(paths) == 13 + 6 * 7 + 3, len(paths)  # flags are empty
+        for path in paths:
+            bad = _tampered(rec, path)
+            assert verify_independent.compare_rate_comparison(
+                event, MARKET, PPP, bad) != [], path
+            # a forger who also recomputes the record's own hash is caught
+            # (re-hashing an edit of the hash alone restores the original)
+            if path != ("record_hash",):
+                assert verify_independent.compare_rate_comparison(
+                    event, MARKET, PPP, _rehashed(bad)) != [], path
+    rec = worldyard.rate_comparison(EVENT, MARKET, PPP)
+    # rows exchanged, reversed, dropped, repeated; a key added or removed
+    rows = rec["rows"]
+    edits = [dict(rec, rows=[rows[1], rows[0]] + rows[2:]),
+             dict(rec, rows=rows[::-1]),
+             dict(rec, rows=rows[:-1]),
+             dict(rec, rows=rows + [rows[0]]),
+             dict(rec, rows=[]),
+             dict(rec, note="x"),
+             {k: v for k, v in rec.items() if k != "notice"},
+             {k: v for k, v in rec.items() if k != "record_hash"},
+             dict(rec, rows=[dict(rows[0], extra=None)] + rows[1:]),
+             dict(rec, rows=[{k: v for k, v in rows[0].items()
+                              if k != "flags"}] + rows[1:]),
+             dict(rec, rows=[dict(rows[0], flags=["NO_MARKET_RATE"])]
+                  + rows[1:]),
+             dict(rec, market=dict(rec["market"], source="another source")),
+             dict(rec, information_only=False),
+             dict(rec, format="worldyard-rate-comparison-2")]
+    for bad in edits:
+        assert verify_independent.compare_rate_comparison(
+            EVENT, MARKET, PPP, bad) != [], bad
+        if _rehashed(bad) != rec:      # dropping the hash alone: restored
+            assert verify_independent.compare_rate_comparison(
+                EVENT, MARKET, PPP, _rehashed(bad)) != [], bad
+    # the record of another event, or of other tables, does not verify
+    six = worldyard.rate_comparison(EVENT_SIX, MARKET, PPP)
+    assert verify_independent.compare_rate_comparison(
+        EVENT, MARKET, PPP, six) != []
+    other = copy.deepcopy(PPP)
+    other["lcu_per_intl_usd"]["INR"] = "20"
+    assert verify_independent.compare_rate_comparison(
+        EVENT, MARKET, other, rec) != []
+
+
+def test_a_malformed_rate_comparison_is_a_difference_not_an_exception():
+    rec = worldyard.rate_comparison(EVENT, MARKET, PPP)
+    for bad in (None, [], "record", 1, [rec]):
+        diffs = verify_independent.compare_rate_comparison(
+            EVENT, MARKET, PPP, bad)
+        assert diffs == [("record", "an object", bad)], bad
+    # JSON types: `true` written as 1, or a number instead of its string.
+    # Equal in Python, other bytes: caught with the hash left alone (the
+    # record's own hash no longer matches) and with it recomputed (it is then
+    # not the expected hash).
+    one = dict(rec, information_only=1)
+    assert one == rec
+    assert verify_independent.compare_rate_comparison(
+        EVENT, MARKET, PPP, one) != []
+    assert verify_independent.compare_rate_comparison(
+        EVENT, MARKET, PPP, _rehashed(one)) != []
+    rows = copy.deepcopy(rec["rows"])
+    rows[0]["declared_over_market"] = 1.25
+    as_number = dict(rec, rows=rows)
+    assert verify_independent.compare_rate_comparison(
+        EVENT, MARKET, PPP, as_number) != []
+    # a record that is not JSON data is a difference, not a crash
+    rows = copy.deepcopy(rec["rows"])
+    rows[0]["flags"] = {"NO_MARKET_RATE"}
+    diffs = verify_independent.compare_rate_comparison(
+        EVENT, MARKET, PPP, dict(rec, rows=rows))
+    assert diffs and diffs[0][0] == "record_hash (internal integrity)"
+
+
+def test_rate_comparison_agrees_on_random_inputs():
+    """Seeded random events and tables: the engine, the independent verifier
+    and the test-side integer rounding give the same strings."""
+    rng = random.Random(20261117)
+    codes = ["USD", "EUR", "CNY", "JPY", "GBP", "INR", "AAA", "BBB"]
+
+    def number():
+        digits = str(rng.randint(1, 10 ** rng.randint(1, 30)))
+        cut = rng.randint(0, len(digits))
+        text = (digits[:cut] or "0") + ("." + digits[cut:] if digits[cut:]
+                                        else "")
+        return text if len(text) <= 80 else digits[:80]
+
+    for _ in range(150):
+        chosen = ["USD"] + rng.sample(codes[1:], rng.randint(0, 7))
+        event = dict(EVENT, units_per_successor={c: number() for c in chosen})
+        mt = {c: number() for c in chosen if rng.random() < 0.8}
+        pt = {c: number() for c in chosen if rng.random() < 0.8}
+        for t in (mt, pt):
+            if "USD" in t:
+                t["USD"] = rng.choice(["1", "1.0", "01"])
+        market = dict(MARKET, usd_per_unit=mt)
+        ppp = dict(PPP, lcu_per_intl_usd=pt)
+        rec = _both_rate_comparisons(event, market, ppp)
+        u = {c: Fraction(v) for c, v in event["units_per_successor"].items()}
+        assert [r["code"] for r in rec["rows"]] == sorted(chosen)
+        for r in rec["rows"]:
+            c = r["code"]
+            implied = u["USD"] / u[c]
+            assert r["declared_implied_usd_per_unit"] == _round50_text(implied)
+            if c in mt:
+                assert r["declared_over_market"] == \
+                    _round50_text(implied / Fraction(mt[c]))
+            else:
+                assert r["declared_over_market"] is None
+                assert "NO_MARKET_RATE" in r["flags"]
+            if c in pt:
+                assert r["declared_over_ppp"] == \
+                    _round50_text(implied * Fraction(pt[c]))
+            else:
+                assert r["declared_over_ppp"] is None
+                assert "NO_PPP_FACTOR" in r["flags"]
+        assert verify_independent.compare_rate_comparison(
+            event, market, ppp, rec) == []
+
+
+def test_rate_comparison_leaves_inputs_and_the_callers_context_alone():
+    event, market, ppp = (copy.deepcopy(EVENT_SIX), copy.deepcopy(MARKET),
+                          copy.deepcopy(PPP))
+    want = worldyard.rate_comparison(event, market, ppp)
+    assert (event, market, ppp) == (EVENT_SIX, MARKET, PPP)
+    # no aliasing: editing the record does not edit the inputs, or v.v.
+    want["market"]["source"] = "edited"
+    want["rows"][0]["flags"].append("X")
+    assert market == MARKET
+    want = worldyard.rate_comparison(event, market, ppp)
+    market["usd_per_unit"]["EUR"] = "2"
+    assert want == worldyard.rate_comparison(EVENT_SIX, MARKET, PPP)
+    saved = decimal.getcontext().copy()
+    try:
+        _hostile_context()
+        got = (worldyard.rate_comparison(EVENT_SIX, MARKET, PPP),
+               verify_independent.recompute_rate_comparison(
+                   EVENT_SIX, MARKET, PPP))
+    finally:
+        decimal.setcontext(saved)
+    assert got == (want, want)
+
+
+def test_gap_of_the_frozen_record_is_the_weighted_mean_of_the_ratios():
+    """The link between the two records: final_value / bridged value equals
+    the mean of declared_over_market weighted by the realized weights at
+    valuation. Both are comparisons only."""
+    art = worldyard.build_artifact(SPEC_USD)
+    rec = worldyard.freeze_fx_leg(SPEC_USD, EVENT, VALUATION_DATE)
+    rows = {r["code"]: r for r in
+            worldyard.rate_comparison(EVENT, MARKET, PPP)["rows"]}
+    contrib = {r["code"]: Fraction(r["fixed_amount"])
+               * Fraction(e["fx_valuation_usd_per_unit"])
+               for r, e in zip(art["basket"], SPEC_USD["basket"])}
+    total = sum(contrib.values())
+    mean = sum(contrib[c] / total * Fraction(rows[c]["declared_over_market"])
+               for c in contrib)
+    assert mean == (Fraction(rec["final_value"])
+                    / Fraction(rec["comparison"]["last_fx_leg_value_bridged"]))
+    assert mean == Fraction("0.800625") / Fraction("0.739625")
+
+
+# --- the independent verifier's command line ----------------------------------------
+def _verifier_cli(words, files):
+    """Run verify_independent.py with `files` (name -> JSON value, or bytes
+    written as they are) in a temporary directory. In `words`, "@name" is the
+    path of that file. Return (exit code, stdout)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = {}
+        for name, value in files.items():
+            paths[name] = os.path.join(tmp, name + ".json")
+            if isinstance(value, bytes):
+                with open(paths[name], "wb") as fh:
+                    fh.write(value)
+            else:
+                with open(paths[name], "w", encoding="utf-8") as fh:
+                    json.dump(value, fh, ensure_ascii=False)
+        argv = [paths.get(w[1:], os.path.join(tmp, "missing.json"))
+                if w.startswith("@") else w for w in words]
+        proc = subprocess.run(
+            [sys.executable, os.path.join(HERE, "verify_independent.py")]
+            + argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return proc.returncode, proc.stdout.decode("utf-8")
+
+
+def test_verifier_command_line_checks_the_records():
+    art = worldyard.build_artifact(SPEC_USD)
+    frozen = worldyard.freeze_fx_leg(SPEC_USD, EVENT, VALUATION_DATE)
+    comparison = worldyard.rate_comparison(EVENT, MARKET, PPP)
+    files = {"spec": SPEC_USD, "art": art, "event": EVENT, "frozen": frozen,
+             "market": MARKET, "ppp": PPP, "cmp": comparison}
+    base = ["@spec", "@art"]
+    with_frozen = base + ["--event", "@event", "--frozen-record", "@frozen"]
+    with_cmp = base + ["--event", "@event", "--market", "@market",
+                       "--ppp", "@ppp", "--rate-comparison", "@cmp"]
+    everything = with_frozen + ["--market", "@market", "--ppp", "@ppp",
+                                "--rate-comparison", "@cmp"]
+
+    # without flags the output is what it always was
+    code, out = _verifier_cli(base, files)
+    lines = out.splitlines()
+    assert code == 0 and lines[0] == "INDEPENDENT VERIFICATION: PASS", out
+    assert [l.split(":")[0].strip() for l in lines[1:]] == \
+        ["spec", "artifact", "input_digest", "artifact_hash", "value_usd"]
+    assert lines[3] == "  input_digest  : " + SRC_INPUT_DIGEST
+    assert lines[4] == "  artifact_hash : " + SRC_ARTIFACT_HASH
+    assert lines[5] == "  value_usd     : 0.92453125 USD"
+
+    code, out = _verifier_cli(with_frozen, files)
+    assert code == 0, out
+    assert "INDEPENDENT VERIFICATION: PASS" in out
+    assert "FROZEN RECORD: PASS" in out and frozen["record_hash"] in out
+    assert ("final_value   : 0.800625 W (fictional scenario identifier, "
+            "not a currency)") in out
+    code, out = _verifier_cli(with_cmp, files)
+    assert code == 0, out
+    assert "RATE COMPARISON (information only): PASS" in out
+    assert comparison["record_hash"] in out
+    assert "no column is a conversion rate" in out
+    code, out = _verifier_cli(everything, files)
+    assert code == 0 and out.count(": PASS") == 3, out
+
+    # a differing field in any requested record: exit 1, the field listed,
+    # the other checks still reported
+    bad_frozen = dict(frozen, final_value="0.8")
+    code, out = _verifier_cli(everything, dict(files, frozen=bad_frozen))
+    assert code == 1, out
+    assert "FROZEN RECORD: FAIL" in out and "field    : final_value" in out
+    assert "INDEPENDENT VERIFICATION: PASS" in out
+    assert "RATE COMPARISON (information only): PASS" in out
+    rows = copy.deepcopy(comparison["rows"])
+    rows[0]["declared_over_market"] = "1.26"
+    code, out = _verifier_cli(with_cmp, dict(files, cmp=dict(comparison,
+                                                              rows=rows)))
+    assert code == 1 and "RATE COMPARISON (information only): FAIL" in out
+    assert "rows[0].declared_over_market" in out
+    code, out = _verifier_cli(with_cmp, dict(files, cmp=[comparison]))
+    assert code == 1 and "field    : record" in out
+    code, out = _verifier_cli(everything, dict(files, art=dict(art,
+                                                               value_usd="1")))
+    assert code == 1 and "INDEPENDENT VERIFICATION: FAIL" in out
+    assert out.count(": PASS") == 2, out
+    # the frozen record of another event
+    six = worldyard.freeze_fx_leg(SPEC_USD, EVENT_SIX, VALUATION_DATE)
+    code, out = _verifier_cli(with_frozen, dict(files, frozen=six))
+    assert code == 1, out
+
+    # operational errors: exit 2
+    needs = [
+        base + ["--frozen-record", "@frozen"],                # no --event
+        base + ["--event", "@event", "--rate-comparison", "@cmp",
+                "--market", "@market"],                        # no --ppp
+        base + ["--event", "@event", "--market", "@market",
+                "--ppp", "@ppp"],                              # nothing to check
+        base + ["--event", "@event"],
+        base + ["--rate-comparison", "@cmp"],
+        base + ["--unknown-flag", "x"],
+        with_frozen[:-1] + ["@nowhere"],                       # unreadable file
+    ]
+    for words in needs:
+        code, out = _verifier_cli(words, files)
+        assert code == 2, (words, out)
+    for name in ("event", "frozen", "market", "ppp", "cmp"):
+        code, out = _verifier_cli(everything, dict(files, **{name: b"{"}))
+        assert code == 2 and out.startswith("ERROR"), (name, out)
+    for name, value in (("event", dict(EVENT, scenario="real")),
+                        ("market", dict(MARKET, numeraire="EUR")),
+                        ("ppp", dict(PPP, reference_year="2100"))):
+        code, out = _verifier_cli(everything, dict(files, **{name: value}))
+        assert code == 2 and out.startswith("ERROR"), (name, out)
+    # the frozen record is checked against the spec it was made from: a
+    # declared-numeraire spec is not frozen
+    spec_w = _spec_w()
+    code, out = _verifier_cli(with_frozen, dict(
+        files, spec=spec_w, art=worldyard.build_artifact(spec_w)))
+    assert code == 2 and out.startswith("ERROR"), out
+
+
+# --- the registry rule for frozen records -----------------------------------------
+def _fails_registry_check(entry, spec, load, directory=None):
+    import test_vintages
+    try:
+        test_vintages.check_frozen_warnings(entry, spec, load, directory)
+    except AssertionError:
+        return True
+    return False
+
+
+def test_frozen_record_enters_the_registry_as_a_structured_warning():
+    """No shipped vintage is frozen, so data/vintages.json has no such
+    warning; the rule is exercised on a registry entry built here (a
+    hypothetical entry, not a real vintage)."""
+    import test_vintages
+    art = worldyard.build_artifact(SPEC_USD)
+    rec = worldyard.freeze_fx_leg(SPEC_USD, EVENT, VALUATION_DATE)
+    files = {"x/spec.json": SPEC_USD, "x/artifact.json": art,
+             "x/event.json": EVENT, "x/frozen.json": rec}
+    warning = {"code": "FX_LEG_FROZEN_AT_CHANGEOVER",
+               "detail": "hypothetical test entry; not a real vintage",
+               "scenario": "hypothetical", "event_id": EVENT["id"],
+               "event_hash": rec["event_hash"], "effective": "2100-01-01",
+               "record_hash": rec["record_hash"],
+               "event_file": "x/event.json", "record_file": "x/frozen.json"}
+    other_warning = {"code": "PPP_LABEL", "detail": "an ordinary warning"}
+    entry = {"id": "x", "artifact_hash": art["artifact_hash"],
+             "status": "current", "supersedes": [], "superseded_by": [],
+             "warnings": [other_warning, warning]}
+
+    def load(path):
+        return copy.deepcopy(files[path])
+
+    assert test_vintages.check_frozen_warnings(entry, SPEC_USD, load) == 1
+    assert test_vintages.check_frozen_warnings(entry, SPEC_USD, load,
+                                               "x") == 1
+    assert test_vintages.check_frozen_warnings(
+        dict(entry, warnings=[other_warning]), SPEC_USD, load) == 0
+
+    def with_warning(**changes):
+        bad = copy.deepcopy(entry)
+        bad["warnings"][1].update(changes)
+        return bad
+
+    # a field that does not match the record
+    for key in ("record_hash", "event_hash", "event_id", "effective",
+                "scenario"):
+        assert _fails_registry_check(
+            with_warning(**{key: "sha256:" + "0" * 64}), SPEC_USD, load), key
+    # a missing, empty, non-string or unknown field
+    for key in test_vintages.FROZEN_WARNING_KEYS[1:]:
+        bad = copy.deepcopy(entry)
+        del bad["warnings"][1][key]
+        assert _fails_registry_check(bad, SPEC_USD, load), key
+        for value in ("", None, 1):
+            assert _fails_registry_check(with_warning(**{key: value}),
+                                         SPEC_USD, load), (key, value)
+    assert _fails_registry_check(with_warning(note="x"), SPEC_USD, load)
+    # file paths: repository-relative, inside the vintage's directory, and
+    # never one of the vintage's own files
+    for path in ("/x/frozen.json", "x/../x/frozen.json", "x//frozen.json",
+                 "x\\frozen.json", "x/./frozen.json", "x/event.json"):
+        assert _fails_registry_check(with_warning(record_file=path),
+                                     SPEC_USD, load), path
+    for path in ("y/frozen.json", "x/sub/frozen.json"):
+        files[path] = rec
+        assert _fails_registry_check(with_warning(record_file=path),
+                                     SPEC_USD, load, "x"), path
+    for own in test_vintages.VINTAGE_OWN_FILES:
+        mapped = dict(files, **{"x/" + own: rec})
+
+        def load_own(path, mapped=mapped):
+            return copy.deepcopy(mapped[path])
+
+        bad = with_warning(record_file="x/" + own)
+        # a valid record, but stored as one of the vintage's own files
+        assert not _fails_registry_check(bad, SPEC_USD, load_own), own
+        assert _fails_registry_check(bad, SPEC_USD, load_own, "x"), own
+    # the record of another artifact; the wrong spec; a second warning for
+    # the same event; a record the independent verifier does not reproduce
+    other = dict(entry, artifact_hash="sha256:" + "1" * 64)
+    assert _fails_registry_check(other, SPEC_USD, load)
+    assert _fails_registry_check(entry, dict(SPEC_USD, method="openunit"),
+                                 load)
+    twice = dict(entry, warnings=[warning, dict(warning)])
+    assert _fails_registry_check(twice, SPEC_USD, load)
+    forged = _rehashed(dict(rec, final_value="0.8"))
+    files["x/forged.json"] = forged
+    assert _fails_registry_check(
+        with_warning(record_file="x/forged.json",
+                     record_hash=forged["record_hash"]), SPEC_USD, load)
+    # an event the format refuses is a failed check, not a crash
+    files["x/bad_event.json"] = dict(EVENT, scenario="real")
+    assert _fails_registry_check(with_warning(event_file="x/bad_event.json"),
+                                 SPEC_USD, load)
+    # the registry test runs the rule on every shipped entry
+    import inspect
+    assert "check_frozen_warnings(" in inspect.getsource(
+        test_vintages.test_vintage_registry_is_consistent)
+    # the shipped registry: no vintage is frozen
+    reg = _load("data", "vintages.json")
+    assert reg["format"] == "openunit-vintage-registry-1"
+    assert not any(w["code"] == "FX_LEG_FROZEN_AT_CHANGEOVER"
+                   for v in reg["vintages"] for w in v["warnings"])
+    for v in reg["vintages"]:
+        spec = _load("data", v["id"], "spec.json")
+        assert test_vintages.check_frozen_warnings(
+            v, spec, lambda p: _load(*p.split("/")), "data/" + v["id"]) == 0
 
 
 # --- runner ---------------------------------------------------------------------

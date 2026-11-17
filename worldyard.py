@@ -68,6 +68,12 @@ Frozen record (hypothetical scenarios only):
   shows that the arithmetic reproduces from its inputs, not that a declared
   rate is authentic, right or fair.
 
+Rate comparison (hypothetical scenarios only; information only):
+  rate_comparison(event, market, ppp) sets the declared rates of such an
+  event beside pinned market rates and PPP factors, as ratios. It compares;
+  it does not grade. Its implied column is not a conversion rate, and a PPP
+  factor is not an exchange rate.
+
 "Don't trust me. Verify me."
 """
 
@@ -1004,8 +1010,188 @@ def freeze_fx_leg(spec, event, valuation_date):
     return record
 
 
+# --- rate comparison (ARTIFACT_FORMAT.md section 12) ----------------------------
+# HYPOTHETICAL SCENARIOS ONLY, and INFORMATION ONLY. The declared rates of a
+# whole-basket successor event are set beside pinned market rates and PPP
+# factors, as ratios. It compares; it does not grade. No column is a
+# conversion rate, and a PPP factor is not an exchange rate.
+RATE_COMPARISON_FORMAT = "worldyard-rate-comparison-1"
+RATE_COMPARISON_ANCHOR = "USD"   # the numeraire of every rate field here
+RATE_NOTICE = (
+    "Information only. Hypothetical scenario: a thought experiment, not a "
+    "forecast, a proposal or an offer of any currency. "
+    "declared_implied_usd_per_unit is a comparison quantity derived from two "
+    "declared rates; it is not a conversion rate and must not be used to "
+    "convert amounts. A PPP factor is not an exchange rate: no column shows a "
+    "correct rate, or that a currency is over- or undervalued.")
+
+_MARKET_KEYS = {"source", "date", "numeraire", "usd_per_unit"}
+_PPP_KEYS = {"source", "reference_year", "lcu_per_intl_usd"}
+
+
+def _pinned_table(table, rates, what):
+    """Exact values of one pinned table of a rate comparison: an object whose
+    keys are codes of the event and whose values are declared numbers; an
+    entry for the anchor currency must equal 1. A code of the event that is
+    missing from the table is allowed (the comparison is then null)."""
+    if not isinstance(table, dict):
+        raise ValueError("%s must be a dict" % what)
+    extra = [code for code in table if code not in rates]
+    if extra:
+        raise ValueError("%s has codes the event does not declare: %s"
+                         % (what, ", ".join(sorted(repr(c) for c in extra))))
+    exact = {}
+    for code, text in table.items():
+        exact[code] = _declared(text, "%s[%s]" % (what, code))
+    if exact.get(RATE_COMPARISON_ANCHOR, (1, 1)) != (1, 1):
+        raise ValueError("%s[%s] must be 1 (the table is in %s)"
+                         % (what, RATE_COMPARISON_ANCHOR,
+                            RATE_COMPARISON_ANCHOR))
+    return exact
+
+
+def rate_comparison(event, market, ppp):
+    """Set the declared rates of a whole-basket successor event beside pinned
+    market rates and PPP factors; return the record (format
+    "worldyard-rate-comparison-1").
+
+    HYPOTHETICAL SCENARIOS ONLY, and INFORMATION ONLY. The successor ("W" in
+    the tests) is a fictional scenario identifier, not a currency code.
+    Nothing here is a forecast, a proposal or an offer of any currency. The
+    record compares; it does not grade. Its implied column is a comparison
+    quantity, NOT a conversion rate, and must not be used to convert amounts
+    (in the euro precedent, rates between two old currencies were not
+    defined). A PPP factor is not an exchange rate: no column shows a correct
+    rate, or that a currency is over- or undervalued.
+
+    event   a whole-basket successor event (see _validate_event) that
+            declares a rate for USD, the anchor of every rate field here
+    market  {"source": <non-empty string>, "date": 'YYYY-MM-DD' before the
+             event's `effective`, "numeraire": "USD",
+             "usd_per_unit": {code: <declared number>, ...}}
+    ppp     {"source": <non-empty string>, "reference_year": 'YYYY' (its
+             observation date, 1 July, before `effective`),
+             "lcu_per_intl_usd": {code: <declared number>, ...}}
+
+    Every table key must be a code of the event; every value is a declared
+    number (a plain decimal string, > 0); a USD entry must be 1. The caller
+    resolves each input under SPEC.md "Data states and fallbacks" first, as
+    for build_artifact, and leaves out an input that resolved unavailable: a
+    missing code gives explicit nulls and the flag NO_MARKET_RATE or
+    NO_PPP_FACTOR, never a guess.
+
+    One row per event code, sorted by code, with u = units_per_successor:
+
+        declared_implied_usd_per_unit = R50( u[USD] / u[code] )
+        declared_over_market          = R50( u[USD] / u[code] / market )
+        declared_over_ppp             = R50( u[USD] / u[code] * factor )
+
+    each computed from the exact values of the verbatim strings and rounded
+    once (50 significant digits, ties to even); no column is computed from
+    another, already rounded one, and no inverse rate is formed.
+    declared_over_ppp is a price level index computed with the
+    declared-implied rate instead of a market rate (United States = 1).
+
+    The record is self-hashed (record_hash) and not anchored. A record shows
+    that the arithmetic reproduces from its inputs. It does not show that a
+    declared rate, a market rate or a PPP factor is authentic, right or fair.
+
+    ValueError for anything malformed. Pure: no I/O, no clock, inputs not
+    mutated, the result is plain JSON data."""
+    effective = _validate_event(event)
+    rates = event["units_per_successor"]
+    if not isinstance(market, dict) or set(market) != _MARKET_KEYS:
+        raise ValueError("market must be a dict with exactly the keys %s"
+                         % sorted(_MARKET_KEYS))
+    if not isinstance(ppp, dict) or set(ppp) != _PPP_KEYS:
+        raise ValueError("ppp must be a dict with exactly the keys %s"
+                         % sorted(_PPP_KEYS))
+    for table, name in ((market, "market"), (ppp, "ppp")):
+        if not isinstance(table["source"], str) or not table["source"]:
+            raise ValueError("%s.source must be a non-empty string" % name)
+    if market["numeraire"] != RATE_COMPARISON_ANCHOR:
+        raise ValueError("market.numeraire must be %r"
+                         % RATE_COMPARISON_ANCHOR)
+    if RATE_COMPARISON_ANCHOR not in rates:
+        raise ValueError("the event declares no rate for %s, the anchor of "
+                         "the comparison" % RATE_COMPARISON_ANCHOR)
+    if _days(market["date"]) >= effective:
+        raise ValueError("market.date %r must be before the event's "
+                         "effective date %r"
+                         % (market["date"], event["effective"]))
+    year = ppp["reference_year"]
+    if not (isinstance(year, str) and len(year) == 4 and year.isascii()
+            and year.isdigit()):
+        raise ValueError("ppp.reference_year must be a string 'YYYY', got %r"
+                         % (year,))
+    if _days(year + "-07-01") >= effective:
+        raise ValueError("ppp.reference_year %r: its observation date (1 "
+                         "July) must be before the event's effective date %r"
+                         % (year, event["effective"]))
+    market_rates = _pinned_table(market["usd_per_unit"], rates,
+                                 "market.usd_per_unit")
+    factors = _pinned_table(ppp["lcu_per_intl_usd"], rates,
+                            "ppp.lcu_per_intl_usd")
+
+    anchor_n, anchor_d = _declared(
+        rates[RATE_COMPARISON_ANCHOR],
+        "units_per_successor[%s]" % RATE_COMPARISON_ANCHOR)
+    rows = []
+    for code in sorted(rates):
+        rate_n, rate_d = _declared(rates[code],
+                                   "units_per_successor[%s]" % code)
+        implied_n, implied_d = anchor_n * rate_d, anchor_d * rate_n
+        flags = []
+        row = {"code": code,
+               "declared_units_per_successor": rates[code],
+               "declared_implied_usd_per_unit": _round50(implied_n,
+                                                         implied_d)}
+        if code in market_rates:
+            market_n, market_d = market_rates[code]
+            row["market_usd_per_unit"] = market["usd_per_unit"][code]
+            row["declared_over_market"] = _round50(implied_n * market_d,
+                                                   implied_d * market_n)
+        else:
+            row["market_usd_per_unit"] = None
+            row["declared_over_market"] = None
+            flags.append("NO_MARKET_RATE")
+        if code in factors:
+            factor_n, factor_d = factors[code]
+            row["ppp_lcu_per_intl_usd"] = ppp["lcu_per_intl_usd"][code]
+            row["declared_over_ppp"] = _round50(implied_n * factor_n,
+                                                implied_d * factor_d)
+        else:
+            row["ppp_lcu_per_intl_usd"] = None
+            row["declared_over_ppp"] = None
+            flags.append("NO_PPP_FACTOR")
+        row["flags"] = sorted(flags)
+        rows.append(row)
+
+    body = {
+        "format": RATE_COMPARISON_FORMAT,
+        "kind": "rate_comparison",
+        "information_only": True,
+        "scenario": event["scenario"],
+        "notice": RATE_NOTICE,
+        "event_id": event["id"],
+        "event_hash": _event_hash(event),
+        "successor": event["successor"],
+        "successor_kind": event["successor_kind"],
+        "effective": event["effective"],
+        "market": {"source": market["source"], "date": market["date"],
+                   "numeraire": market["numeraire"]},
+        "ppp": {"source": ppp["source"],
+                "reference_year": ppp["reference_year"]},
+        "rows": rows,
+    }
+    record = dict(body)
+    record["record_hash"] = sha256(body)
+    return record
+
+
 # --- display (never hashed) ---------------------------------------------------
 INTL_DOLLAR = "international $"
+FICTIONAL_UNIT_NOTE = "(fictional scenario identifier, not a currency)"
 
 
 def _ppp_valued(spec):
@@ -1038,8 +1224,14 @@ def display_unit(artifact, spec=None):
     'international $ (numeraire field: USD)'. With the spec, a PPP vintage is
     recognised exactly (see _ppp_valued). From an artifact alone the only hint
     is its hashed `weight_vintage_label`: the PPP vintages carry the token
-    "PPP" there ("WB-PPP-2024"). Every other artifact prints its numeraire."""
+    "PPP" there ("WB-PPP-2024"). An artifact with a declared numeraire
+    (hypothetical scenarios only) prints its code with the note
+    "(fictional scenario identifier, not a currency)", e.g. "W (fictional
+    scenario identifier, not a currency)". Every other artifact prints its
+    numeraire."""
     numeraire = artifact.get("numeraire", "USD")
+    if "numeraire_declaration" in artifact:
+        return "%s %s" % (numeraire, FICTIONAL_UNIT_NOTE)
     if numeraire != "USD":
         return numeraire
     if spec is not None:

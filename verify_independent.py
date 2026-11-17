@@ -17,6 +17,15 @@ fractions, sys, argparse).
 
 Usage:
     python3 verify_independent.py <spec.json> <artifact.json>
+        [--event <event.json>] [--frozen-record <record.json>]
+        [--market <market.json> --ppp <ppp.json>
+         --rate-comparison <record.json>]
+
+The artifact check always runs. The optional flags (hypothetical scenarios
+only) also check a frozen record against the spec it was made from and an
+event, and an information-only rate comparison against an event and its two
+pinned tables. --frozen-record needs --event; --rate-comparison needs --event,
+--market and --ppp; a flag that no requested check uses is an error.
 
 It re-derives, from the spec alone: every population share, effective weight,
 fixed amount, the baseline value, the valuation value, both realized-weight
@@ -28,8 +37,9 @@ source artifact, checks that the spec binds it, and recomputes the two
 restated values with exact fractions.
 
 As a library it also recomputes the frozen record of a whole-basket successor
-event (`recompute_frozen_record`, `compare_frozen_record`; hypothetical
-scenarios only).
+event (`recompute_frozen_record`, `compare_frozen_record`) and the
+information-only rate comparison (`recompute_rate_comparison`,
+`compare_rate_comparison`); both are for hypothetical scenarios only.
 
 A PASS means that the published artifact reproduces from the spec. It does
 not mean that the spec's inputs, or a declared rate, are authentic, right or
@@ -37,9 +47,10 @@ fair.
 
 Exit status:
     0   the published artifact matches the independent recomputation exactly
-        (every field, both hashes)
+        (every field, both hashes), and so does every requested record
     1   verification failed; each differing field is listed on stdout
-    2   operational error (unreadable file, invalid JSON, malformed spec)
+    2   operational error (unreadable file, invalid JSON, malformed spec,
+        event or table, a flag without the flags it needs)
 
 > Don't trust me. Verify me.  -- so here is the second pair of eyes.
 """
@@ -629,6 +640,174 @@ def compare_frozen_record(spec, event, record):
     return unique
 
 
+# --- rate comparison (ARTIFACT_FORMAT.md section 12; information only) --------
+# A hypothetical-scenario record that sets the declared rates of an event
+# beside pinned market rates and PPP factors. Recomputing it shows that the
+# arithmetic reproduces; it says nothing about whether any of the rates is
+# authentic, right or fair, and none of its columns is a conversion rate.
+RATE_COMPARISON_NOTICE = (
+    "Information only. Hypothetical scenario: a thought experiment, not a "
+    "forecast, a proposal or an offer of any currency. "
+    "declared_implied_usd_per_unit is a comparison quantity derived from two "
+    "declared rates; it is not a conversion rate and must not be used to "
+    "convert amounts. A PPP factor is not an exchange rate: no column shows a "
+    "correct rate, or that a currency is over- or undervalued.")
+
+MARKET_KEYS = {"source", "date", "numeraire", "usd_per_unit"}
+PPP_KEYS = {"source", "reference_year", "lcu_per_intl_usd"}
+
+
+def _comparison_values(table, declared_codes, name):
+    """The exact values of one pinned table (`usd_per_unit` or
+    `lcu_per_intl_usd`): every key a code that the event declares, every
+    value a declared number, and a "USD" entry, if any, equal to 1."""
+    if not isinstance(table, dict):
+        raise ValueError("%s must be an object" % name)
+    values = {}
+    for code in table:
+        if code not in declared_codes:
+            raise ValueError("%s has a code the event does not declare: %r"
+                             % (name, code))
+        values[code] = exact_declared(table[code], "%s[%s]" % (name, code))
+    if "USD" in values and values["USD"] != 1:
+        raise ValueError("%s[USD] must be 1: the table is in USD" % name)
+    return values
+
+
+def recompute_rate_comparison(event, market, ppp):
+    """Derive the complete rate comparison (format
+    `worldyard-rate-comparison-1`, ARTIFACT_FORMAT.md section 12) from an
+    event and two pinned tables. With u = the event's units_per_successor,
+    for each code of the event, in sorted order:
+
+        declared_implied_usd_per_unit = R50( u[USD] / u[code] )
+        declared_over_market          = R50( u[USD] / u[code] / market[code] )
+        declared_over_ppp             = R50( u[USD] / u[code] * factor[code] )
+
+    each from exact fractions of the verbatim strings, rounded once; null
+    with a flag when the table has no entry for the code. Anything the
+    format refuses raises ValueError: a malformed event, tables of the wrong
+    shape, a market numeraire other than USD, no declared rate for USD, a
+    market date or a PPP reference date (1 July) not before the event, a
+    code outside the event, a value that is not a declared number, a USD
+    entry other than 1."""
+    effective = check_successor_event(event)
+    declared = event["units_per_successor"]
+    if not isinstance(market, dict) or set(market) != MARKET_KEYS:
+        raise ValueError("market must be an object with exactly the keys %s"
+                         % sorted(MARKET_KEYS))
+    if not isinstance(ppp, dict) or set(ppp) != PPP_KEYS:
+        raise ValueError("ppp must be an object with exactly the keys %s"
+                         % sorted(PPP_KEYS))
+    if not isinstance(market["source"], str) or market["source"] == "":
+        raise ValueError("market.source must be a non-empty string")
+    if not isinstance(ppp["source"], str) or ppp["source"] == "":
+        raise ValueError("ppp.source must be a non-empty string")
+    if market["numeraire"] != "USD":
+        raise ValueError("market.numeraire must be 'USD'")
+    if "USD" not in declared:
+        raise ValueError("the event declares no rate for USD")
+    if not day_number(market["date"]) < effective:
+        raise ValueError("market.date must be before the event")
+    year = ppp["reference_year"]
+    if not (isinstance(year, str) and len(year) == 4
+            and all(ch in "0123456789" for ch in year)):
+        raise ValueError("ppp.reference_year must be a string 'YYYY': %r"
+                         % (year,))
+    if not day_number(year + "-07-01") < effective:
+        raise ValueError("1 July of ppp.reference_year must be before the "
+                         "event")
+    market_values = _comparison_values(market["usd_per_unit"], declared,
+                                       "market.usd_per_unit")
+    factor_values = _comparison_values(ppp["lcu_per_intl_usd"], declared,
+                                       "ppp.lcu_per_intl_usd")
+
+    usd = exact_declared(declared["USD"], "units_per_successor[USD]")
+    rows = []
+    for code in sorted(declared):
+        implied = usd / exact_declared(declared[code],
+                                       "units_per_successor[%s]" % code)
+        row = {"code": code,
+               "declared_units_per_successor": declared[code],
+               "declared_implied_usd_per_unit": round_once(implied),
+               "market_usd_per_unit": None,
+               "declared_over_market": None,
+               "ppp_lcu_per_intl_usd": None,
+               "declared_over_ppp": None,
+               "flags": []}
+        if code in market_values:
+            row["market_usd_per_unit"] = market["usd_per_unit"][code]
+            row["declared_over_market"] = round_once(
+                implied / market_values[code])
+        else:
+            row["flags"].append("NO_MARKET_RATE")
+        if code in factor_values:
+            row["ppp_lcu_per_intl_usd"] = ppp["lcu_per_intl_usd"][code]
+            row["declared_over_ppp"] = round_once(
+                implied * factor_values[code])
+        else:
+            row["flags"].append("NO_PPP_FACTOR")
+        rows.append(row)
+
+    try:
+        event_hash = hash_of(event)
+    except TypeError:
+        raise ValueError("the event declaration is not plain JSON data")
+    body = {
+        "format": "worldyard-rate-comparison-1",
+        "kind": "rate_comparison",
+        "information_only": True,
+        "scenario": event["scenario"],
+        "notice": RATE_COMPARISON_NOTICE,
+        "event_id": event["id"],
+        "event_hash": event_hash,
+        "successor": event["successor"],
+        "successor_kind": event["successor_kind"],
+        "effective": event["effective"],
+        "market": {"source": market["source"], "date": market["date"],
+                   "numeraire": market["numeraire"]},
+        "ppp": {"source": ppp["source"], "reference_year": year},
+        "rows": rows,
+    }
+    expected = dict(body)
+    expected["record_hash"] = hash_of(body)
+    return expected
+
+
+def compare_rate_comparison(event, market, ppp, record):
+    """Return the list of differences between a published rate comparison
+    and its independent recomputation. Empty list == the record reproduces.
+
+    A malformed event or table raises ValueError, as compare() does. Whatever
+    is wrong with the RECORD is reported as a difference: a record that is
+    not an object, a `record_hash` that is not the hash of the rest of the
+    record, and every field that differs from the recomputation, missing and
+    unexpected keys included."""
+    expected = recompute_rate_comparison(event, market, ppp)
+    if not isinstance(record, dict):
+        return [("record", "an object", record)]
+
+    diffs = []
+    claimed = {k: v for k, v in record.items() if k != "record_hash"}
+    try:
+        own_hash = hash_of(claimed)
+    except (TypeError, ValueError):
+        own_hash = "<the record is not plain JSON data>"
+    if own_hash != record.get("record_hash"):
+        diffs.append(("record_hash (internal integrity)", own_hash,
+                      record.get("record_hash")))
+
+    _walk_diffs(expected, record, "", diffs)
+
+    seen, unique = set(), []
+    for d in diffs:
+        k = repr(d)
+        if k not in seen:
+            seen.add(k)
+            unique.append(d)
+    return unique
+
+
 # --- display only (SPEC.md section 2.3; never hashed) -------------------------
 def is_ppp_valued(spec):
     """True iff every basket entry records `ppp_factor_lcu_per_intl_usd` and
@@ -652,37 +831,23 @@ def is_ppp_valued(spec):
     return True
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(
-        prog="verify_independent.py",
-        description="Independently re-verify a Worldyard (or openunit) "
-                    "artifact against its spec, from the published format "
-                    "documents alone (no engine import). Exit 0 iff every "
-                    "field matches.")
-    parser.add_argument("spec", help="path to spec.json (the hashed input)")
-    parser.add_argument("artifact", help="path to artifact.json (the published "
-                                         "result)")
-    args = parser.parse_args(argv)
+FICTIONAL_UNIT_NOTE = "(fictional scenario identifier, not a currency)"
 
-    try:
-        with open(args.spec, "r", encoding="utf-8") as fh:
-            spec = json.load(fh)
-        with open(args.artifact, "r", encoding="utf-8") as fh:
-            artifact = json.load(fh)
-        diffs = compare(spec, artifact)
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        print("ERROR: %s" % exc)
-        return 2
 
-    if diffs:
-        print("INDEPENDENT VERIFICATION: FAIL  (%d field(s) differ)"
-              % len(diffs))
-        for where, want, got in diffs:
-            print("  field    : %s" % where)
-            print("    expected : %s" % (want,))
-            print("    published: %s" % (got,))
-        return 1
+def _read_json(path):
+    with open(path, "r", encoding="utf-8") as fh:
+        return json.load(fh)
 
+
+def _print_fail(title, diffs):
+    print("%s: FAIL  (%d field(s) differ)" % (title, len(diffs)))
+    for where, want, got in diffs:
+        print("  field    : %s" % where)
+        print("    expected : %s" % (want,))
+        print("    published: %s" % (got,))
+
+
+def _print_artifact_pass(args, spec, artifact):
     print("INDEPENDENT VERIFICATION: PASS")
     print("  spec          : %s" % args.spec)
     print("  artifact      : %s" % args.artifact)
@@ -692,13 +857,111 @@ def main(argv=None):
     if "numeraire_declaration" in artifact:
         # a declared numeraire: the value field is `value`, and the unit is
         # a fictional scenario identifier (hypothetical scenarios only)
-        print("  value         : %s %s (fictional scenario identifier, not "
-              "a currency)" % (artifact["value"], unit))
-        return 0
+        print("  value         : %s %s %s"
+              % (artifact["value"], unit, FICTIONAL_UNIT_NOTE))
+        return
     if unit == "USD" and is_ppp_valued(spec):
         unit = "international $ (numeraire field: USD)"
     print("  value_usd     : %s %s" % (artifact["value_usd"], unit))
-    return 0
+
+
+def _flag_problem(args):
+    """The reason a combination of flags cannot be run, or None."""
+    if args.frozen_record is not None and args.event is None:
+        return "--frozen-record needs --event"
+    if args.rate_comparison is not None and (
+            args.event is None or args.market is None or args.ppp is None):
+        return "--rate-comparison needs --event, --market and --ppp"
+    if (args.market is not None or args.ppp is not None) \
+            and args.rate_comparison is None:
+        return "--market and --ppp are used only with --rate-comparison"
+    if args.event is not None and args.frozen_record is None \
+            and args.rate_comparison is None:
+        return "--event is used only with --frozen-record or --rate-comparison"
+    return None
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        prog="verify_independent.py",
+        description="Independently re-verify a Worldyard (or openunit) "
+                    "artifact against its spec, from the published format "
+                    "documents alone (no engine import). Exit 0 iff every "
+                    "field matches.",
+        epilog="The record checks are for hypothetical scenarios only. A "
+               "PASS shows that a record reproduces from its inputs; it does "
+               "not show that a declared rate is authentic, right or fair, "
+               "and a rate comparison is information only (no column is a "
+               "conversion rate).")
+    parser.add_argument("spec", help="path to spec.json (the hashed input)")
+    parser.add_argument("artifact", help="path to artifact.json (the published "
+                                         "result)")
+    parser.add_argument("--event", metavar="EVENT.json",
+                        help="a whole-basket successor event (hypothetical "
+                             "scenarios only); used by --frozen-record and "
+                             "--rate-comparison")
+    parser.add_argument("--frozen-record", metavar="RECORD.json",
+                        help="also check this frozen record against the spec "
+                             "(the spec it was made from) and the event")
+    parser.add_argument("--market", metavar="MARKET.json",
+                        help="the pinned market table of --rate-comparison")
+    parser.add_argument("--ppp", metavar="PPP.json",
+                        help="the pinned PPP table of --rate-comparison")
+    parser.add_argument("--rate-comparison", metavar="RECORD.json",
+                        help="also check this rate comparison (information "
+                             "only) against the event and the two tables")
+    args = parser.parse_args(argv)
+
+    problem = _flag_problem(args)
+    if problem:
+        print("ERROR: %s" % problem)
+        return 2
+
+    records = []      # (title, path, record, differences)
+    try:
+        spec = _read_json(args.spec)
+        artifact = _read_json(args.artifact)
+        diffs = compare(spec, artifact)
+        if args.event is not None:
+            event = _read_json(args.event)
+        if args.frozen_record is not None:
+            record = _read_json(args.frozen_record)
+            records.append(("FROZEN RECORD", args.frozen_record, record,
+                            compare_frozen_record(spec, event, record)))
+        if args.rate_comparison is not None:
+            market = _read_json(args.market)
+            ppp = _read_json(args.ppp)
+            record = _read_json(args.rate_comparison)
+            records.append(("RATE COMPARISON (information only)",
+                            args.rate_comparison, record,
+                            compare_rate_comparison(event, market, ppp,
+                                                    record)))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print("ERROR: %s" % exc)
+        return 2
+
+    status = 0
+    if diffs:
+        _print_fail("INDEPENDENT VERIFICATION", diffs)
+        status = 1
+    else:
+        _print_artifact_pass(args, spec, artifact)
+    for title, path, record, record_diffs in records:
+        if record_diffs:
+            _print_fail(title, record_diffs)
+            status = 1
+            continue
+        print("%s: PASS" % title)
+        print("  record        : %s" % path)
+        print("  record_hash   : %s" % record["record_hash"])
+        if record["kind"] == "frozen_fx_leg":
+            print("  final_value   : %s %s %s"
+                  % (record["final_value"], record["final_value_numeraire"],
+                     FICTIONAL_UNIT_NOTE))
+        else:
+            print("  rows          : %d (no column is a conversion rate)"
+                  % len(record["rows"]))
+    return status
 
 
 if __name__ == "__main__":

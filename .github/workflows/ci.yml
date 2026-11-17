@@ -40,6 +40,7 @@ jobs:
           python test_properties.py
           python test_fallbacks.py
           python test_compat.py
+          python test_changeover.py
 
       - name: Independent second-implementation verifier (no engine import)
         shell: bash

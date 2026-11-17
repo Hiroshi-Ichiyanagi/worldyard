@@ -6,8 +6,9 @@ on-disk and on-the-wire byte layout precisely enough for an independent
 implementation to reproduce Worldyard hashes exactly. The authoritative encoder
 is `worldyard.canonical`; the normative behavior is the text of this document
 plus `SPEC.md`. Sections 1–8 are the format; section 9 states conformance and
-names the minimal third-party verifier; sections 10 and 11 define the event
-object and the frozen record of a hypothetical scenario.
+names the minimal third-party verifier; sections 10, 11 and 12 define the
+event object, the frozen record and the information-only rate comparison of a
+hypothetical scenario.
 
 **What changed from `worldyard-artifact-2`:**
 
@@ -20,10 +21,11 @@ object and the frozen record of a hypothetical scenario.
    instead of `baseline_value_usd`, `value_usd`) and keeps every basket row.
 3. **The decimal context is stated in full** (§1), and the new numbers are
    exact rationals rounded once (§1.1).
-4. **Two objects for a hypothetical scenario** are defined next to the
-   artifact: the whole-basket successor event (§10) and the frozen record
-   (§11, its own format name `worldyard-frozen-record-1`). Neither changes
-   any artifact.
+4. **Three objects for a hypothetical scenario** are defined next to the
+   artifact: the whole-basket successor event (§10), the frozen record
+   (§11, its own format name `worldyard-frozen-record-1`) and the
+   information-only rate comparison (§12, `worldyard-rate-comparison-1`).
+   None of them changes any artifact.
 
 Every conforming `worldyard-artifact-2` spec and artifact whose numeraire is
 three upper-case ASCII letters, or absent, is a `worldyard-artifact-3` spec
@@ -352,18 +354,22 @@ encoding (§2) — to one built per §§1–8 and `SPEC.md`, and computes the sa
    two values as `R50` of exact quotients (§1.1), never through an inverse
    rate.
 
-An implementation that also produces frozen records conforms for them iff
-each record is identical, under the canonical encoding, to one built per
-§10–§11, and nothing is produced where those sections say so.
+An implementation that also produces frozen records or rate comparisons
+conforms for them iff each record is identical, under the canonical
+encoding, to one built per §10–§12, and nothing is produced where those
+sections say so.
 
 **Minimal third-party verifier.** `verify_independent.py` (bundled) is a second
 implementation of this standard written from `SPEC.md` and this document alone —
 it never imports `worldyard`, `openunit`, `cli`, or `anchor`, and uses only the standard
 library. It re-derives every field and both hashes from a spec and compares them
 against a published artifact (`python3 verify_independent.py spec.json
-artifact.json`, exit 0 iff every field matches); as a library it also
-recomputes a frozen record (§11). It is both the conformance
-oracle for this standard and the tool a third party can run to check a published
+artifact.json`, exit 0 iff every field matches); it also recomputes a frozen
+record (§11) and a rate comparison (§12), as a library and from the command
+line (`--event E.json --frozen-record R.json`; `--event E.json --market
+M.json --ppp P.json --rate-comparison C.json`; exit 0 iff every requested
+check passes, 1 if a field differs, 2 on an operational error). It is both the
+conformance oracle for this standard and the tool a third party can run to check a published
 value without trusting the Worldyard engine. `test_independent.py`,
 `test_properties.py`, `test_compat.py` and `test_changeover.py` cross-validate
 the engine against it. For the exact values of §1.1 the two take different
@@ -534,5 +540,116 @@ this without the engine (`compare_frozen_record(spec, event, record)`, an
 empty list iff the record reproduces): a malformed spec or event is an error;
 anything wrong with the record — not an object, a date that is missing,
 malformed or not before the event, a wrong hash, any differing, missing or
+extra field — is reported as a difference.
+
+## 12. Rate comparison (`worldyard-rate-comparison-1`; hypothetical scenarios only; information only)
+
+A **rate comparison** sets the declared rates of a whole-basket successor
+event (§10) beside pinned market rates and PPP factors, as ratios. It
+compares; it does not grade. Its implied column is a comparison quantity,
+**not a conversion rate**, and must not be used to convert amounts: in the
+euro precedent, conversion rates between two old currencies were "not
+defined" and could not be used (`SPEC.md`, "Whole-basket successor event").
+A PPP factor is not an exchange rate. No column shows a correct rate, or
+that a currency is over- or undervalued.
+
+It is built from three inputs: an event (§10) and two tables.
+
+| input | rule |
+|---|---|
+| event | well formed (§10), and `"USD"` is one of its codes: USD is the numeraire of every rate field of this format, so it is the anchor of the comparison |
+| `market` | exactly `{"source", "date", "numeraire", "usd_per_unit"}`. `source` a non-empty string; `numeraire` exactly `"USD"`; `date` a date `YYYY-MM-DD` strictly before `effective`; `usd_per_unit` an object |
+| `ppp` | exactly `{"source", "reference_year", "lcu_per_intl_usd"}`. `source` a non-empty string; `reference_year` a string of four ASCII digits whose 1 July (the observation date of an annual series, `SPEC.md` "Data states and fallbacks") is strictly before `effective`; `lcu_per_intl_usd` an object |
+
+In both tables every key is a code of the event and every value is a
+declared number (§1.1), kept verbatim; a `"USD"` entry, if present, must
+have the value 1 (any text of it, e.g. `"1"` or `"1.0"`). A code of the event
+that a table does not list is not an error: that comparison is `null` and
+flagged. The tables hold **pinned** values: whoever makes the record
+resolves each input under `SPEC.md` "Data states and fallbacks" first, as for
+a spec, and leaves out an input that resolved `unavailable`. Anything else
+is an error: no record is produced.
+
+The record has exactly these 14 keys:
+
+| key | value |
+|---|---|
+| `format` | `"worldyard-rate-comparison-1"` |
+| `kind` | `"rate_comparison"` |
+| `information_only` | `true` |
+| `scenario` | `event.scenario` |
+| `notice` | the fixed text below |
+| `event_id` | `event.id` |
+| `event_hash` | the hash of the event (§10) |
+| `successor`, `successor_kind`, `effective` | copied from the event |
+| `market` | `{"source", "date", "numeraire"}` copied from the market table |
+| `ppp` | `{"source", "reference_year"}` copied from the PPP table |
+| `rows` | one object per code of the event, sorted by code (below) |
+| `record_hash` | `"sha256:" + sha256(canonical(record without this key)).hexdigest()` |
+
+Each row has exactly these 8 keys, with `u` the event's
+`units_per_successor`, `m` the market table and `f` the PPP table:
+
+| key | value |
+|---|---|
+| `code` | the code |
+| `declared_units_per_successor` | `u[code]`, verbatim |
+| `declared_implied_usd_per_unit` | `R50( Q(u[USD]) / Q(u[code]) )` |
+| `market_usd_per_unit` | `m[code]` verbatim, or `null` |
+| `declared_over_market` | `R50( Q(u[USD]) / Q(u[code]) / Q(m[code]) )`, or `null` |
+| `ppp_lcu_per_intl_usd` | `f[code]` verbatim, or `null` |
+| `declared_over_ppp` | `R50( Q(u[USD]) / Q(u[code]) × Q(f[code]) )`, or `null` |
+| `flags` | sorted array: `"NO_MARKET_RATE"` when `m` has no entry for the code, `"NO_PPP_FACTOR"` when `f` has none |
+
+Rules of the arithmetic (§1.1): each column is computed from the exact
+values of the verbatim strings and rounded **once**; no column is computed
+from another, already rounded one, and no inverse rate is formed. A ratio is
+declared ÷ reference: 1 means the declared rates imply the reference figure
+exactly. The PPP-implied international dollars per unit is `1 / f[code]`, so
+`declared_over_ppp` is the implied rate times the factor: the price level
+index (a PPP divided by an exchange rate; United States = 1) computed with
+the declared-implied rate instead of a market rate.
+
+The notice is one line of ASCII, part of the format and hashed with the
+record:
+
+> Information only. Hypothetical scenario: a thought experiment, not a forecast, a proposal or an offer of any currency. declared_implied_usd_per_unit is a comparison quantity derived from two declared rates; it is not a conversion rate and must not be used to convert amounts. A PPP factor is not an exchange rate: no column shows a correct rate, or that a currency is over- or undervalued.
+
+What a record binds: the event (its hash covers every declared rate), the
+names and dates of the two pinned tables and, row by row, every value used.
+It is self-hashed; it is not anchored. What it does not show: that a declared
+rate, a market rate or a PPP factor is authentic, right or fair.
+
+Worked reference (illustrative inputs: the event of `SPEC.md`; market USD
+per unit EUR 1.25, CNY 0.1, JPY 0.00625, GBP 1.25, INR 0.0125, USD 1, dated
+`2099-12-31`; PPP factors EUR 0.8, CNY 4, JPY 100, GBP 0.64, INR 25, USD 1,
+reference year `2099`; the two `source` texts of `test_changeover.py`):
+
+| code | implied | over market | over PPP |
+|---|---|---|---|
+| CNY | `0.125` | `1.25` | `0.5` |
+| EUR | `1.25` | `1` | `1` |
+| GBP | `1.5625` | `1.25` | `1` |
+| INR | `0.0125` | `1` | `0.3125` |
+| JPY | `0.00625` | `1` | `0.625` |
+| USD | `1` | `1` | `1` |
+
+`record_hash sha256:946bced6f1f9672d248f2faae6a050f24b4fd6f466b7bdae5959887449299145`.
+With the six-figure rates of §11 the CNY row reads
+`0.29816436138344434162605170765766658485236074925643`,
+`2.9816436138344434162605170765766658485236074925643` and
+`1.1926574455337773665042068306306663394094429970257`.
+
+The link to the frozen record (§11): `final_value` divided by
+`last_fx_leg_value_bridged` equals the mean of `declared_over_market`
+weighted by the realized weights at valuation of the source artifact (in the
+example 0.800625 / 0.739625). Both are comparisons only.
+
+**Verifying a record.** A record reproduces iff recomputing it from the
+event and the two tables gives the identical object and its `record_hash` is
+the hash of the rest. `verify_independent.py` does this without the engine
+(`compare_rate_comparison(event, market, ppp, record)`, an empty list iff the
+record reproduces): a malformed event or table is an error; anything wrong
+with the record — not an object, a wrong hash, any differing, missing or
 extra field — is reported as a difference.
 

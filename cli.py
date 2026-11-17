@@ -47,7 +47,7 @@ def cmd_build(args):
         return 1
     _dump(art, args.output)
     if args.output:
-        v = Decimal(art["value_usd"]).quantize(Decimal("0.000001"))
+        v = Decimal(worldyard.artifact_value(art)).quantize(Decimal("0.000001"))
         print("built %s  ->  1 %s = %s %s"
               % (args.output, art["method"], v,
                  worldyard.display_unit(art, spec)))
@@ -65,7 +65,7 @@ def cmd_verify(args):
 
 def cmd_show(args):
     art = _load(args.artifact)
-    v = Decimal(art["value_usd"]).quantize(Decimal("0.000001"))
+    v = Decimal(worldyard.artifact_value(art)).quantize(Decimal("0.000001"))
     print("method        : %s %s" % (art["method"], art["method_version"]))
     print("1 unit        : %s %s" % (v, worldyard.display_unit(art)))
     print("weight basis  : %s" % art["weight_basis"])

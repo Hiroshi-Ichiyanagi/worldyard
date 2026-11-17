@@ -103,7 +103,9 @@ value is in international dollars (PPP-adjusted US dollars), as the vintage's
 valuation leg exactly: every basket entry records `ppp_factor_lcu_per_intl_usd`
 and its `fx_valuation_usd_per_unit` equals `1 / ppp_factor_lcu_per_intl_usd`.
 From an artifact alone (`show`) the only hint is the token `PPP` in
-`weight_vintage_label`. No hashed field changes.
+`weight_vintage_label`. No hashed field changes. At a whole-basket successor
+event (hypothetical scenarios only) a PPP vintage is neither frozen nor
+re-denominated; see "The PPP valuation leg at the event".
 
 ## 3. Determinism
 
@@ -237,6 +239,10 @@ returns the declared spec for a spec and the artifact built from it. Example on
 illustrative inputs: a value of `0.92453125` USD at 1.25 USD per W reads
 `0.739625` W, and the baseline `1.000000` reads `0.8` W; the six pinned
 quantities are the same six strings.
+
+For display only, the CLI (`build`, `show`), the demo and
+`verify_independent.py` print the unit of such an artifact as "W (fictional
+scenario identifier, not a currency)"; no hashed field changes.
 
 What this does not show: that a declared rate is authentic, right or fair, or
 that anything will ever be converted. The engine cannot authenticate a
@@ -566,6 +572,104 @@ The independent verifier recomputes a record with its own code
 record: `data/` holds real vintages only, and the examples and tests of this
 section use invented inputs.
 
+### The PPP valuation leg at the event
+
+A PPP-valued vintage (§2.3; `v0.2-ppp` and `v0.4-ppp-unwpp`) is not frozen,
+not continued and not re-denominated by this library: `freeze_fx_leg`,
+`redenominate` and a declared numeraire refuse it (`ValueError`). Its value is
+in international dollars, not an amount of any currency that a declared rate
+converts, and a PPP factor is not an exchange rate. Calling such a value "the
+last FX-leg value", or giving it the numeraire `"W"`, would be false.
+
+- **Resolving inputs.** Populations and PPP factors are not FX-leg inputs, so
+  they are resolved **without** the event (no `changeover`). The resolver
+  cannot tell what a series measures: with the event supplied it refuses
+  every input on or after the date, so the caller must pass the event for
+  FX-leg inputs only. A PPP factor observed before the event stays usable
+  with the old-unit quantities within its maximum age (1096 days from 1 July
+  of its reference year) and is `TOO_OLD` after that.
+- **A factor restated in the successor unit is not defined in this version.**
+  A factor is quoted in local units per international dollar, so carrying a
+  factor stated in successor units back to old units would need a
+  multiplication by the declared rate. The per-series `fixed_conversion` rule
+  divides by `units_per_successor`, which is right for a rate quoted as
+  numeraire per unit (here the PPP-implied international dollars per unit,
+  `1 / factor`) and wrong for the factor as published: a factor of 0.4
+  successor units per international dollar at 10 old units per successor
+  would resolve to 0.04 instead of 4. Whether such series would ever exist is
+  unknowable, and a purchasing-power reading in the successor unit would be
+  a new, separately named methodology.
+- **The basket of a PPP vintage can still be valued at the declared rates,
+  through a nominal sibling.** The pinned quantities depend only on
+  populations, multipliers and the baseline rates, not on the valuation leg.
+  A nominal spec with the same basket and the same baseline rates pins the
+  same quantities and can be frozen (`test_changeover.py` checks this on
+  `v0.4-ppp-unwpp`). Its frozen record states the declared-rate value of the
+  same basket; it says nothing about purchasing power.
+- **Limit.** A PPP-valued spec is recognised exactly as §2.3 describes
+  (every entry records `ppp_factor_lcu_per_intl_usd` and is valued at
+  `1 / factor`). A PPP-valued spec that does not record its factors cannot be
+  recognised, and is treated as an FX-valued one.
+
+### The rate comparison (information only)
+
+`worldyard.rate_comparison(event, market, ppp)` sets the declared rates of an
+event beside pinned market rates (USD per unit) and PPP factors (local
+currency units per international dollar), as ratios. It compares; it does
+not grade. The record has its own format, `worldyard-rate-comparison-1`
+(`ARTIFACT_FORMAT.md` §12). With `u` the event's `units_per_successor`, one
+row per code of the event:
+
+```
+declared_implied_usd_per_unit = R50( u[USD] / u[code] )
+declared_over_market          = R50( u[USD] / u[code] / market[code] )
+declared_over_ppp             = R50( u[USD] / u[code] × factor[code] )
+```
+
+- **The implied column is not a conversion rate.** It is what the declared
+  rates imply for one unit of an old currency in USD, shown for comparison
+  only, and it must not be used to convert amounts. In the euro precedent,
+  "Bilateral conversion rates between national currency units are not defined
+  and cannot be used" (European Commission, "Converting to the euro",
+  <https://economy-finance.ec.europa.eu/euro/enlargement-euro-area/adoption-fixed-euro-conversion-rate/converting-euro_en>,
+  read 2026-11-17). An old amount is converted by its own declared rate,
+  never through another old currency.
+- **A PPP factor is not an exchange rate.** PPPs "should not be interpreted
+  as equilibrium exchange rates" (World Bank, ICP FAQ,
+  <https://www.worldbank.org/en/programs/icp/faq>, read 2026-11-17).
+  `declared_over_ppp` is the price level index (the ratio of a PPP to an
+  exchange rate, United States = 1) computed with the declared-implied rate
+  in place of a market rate. No column shows a correct rate, or that a
+  currency is over- or undervalued.
+- **USD is the anchor**, because every rate field of Worldyard is in USD and
+  the field names say so: the event must declare a rate for USD, the market
+  table's `numeraire` must be `"USD"`, and a USD entry in either table must
+  be 1.
+- **Ratios only.** Each ratio is declared ÷ reference; 1 means that the
+  declared rates imply the reference figure exactly. A percentage would say
+  the same.
+- **Pinned inputs, resolved first.** The two tables hold pinned values, like a
+  spec. Each input is resolved under "Data states and fallbacks" first (an
+  FX-leg input on or after the event's date resolves to
+  `FX_LEG_FROZEN_AT_CHANGEOVER`, so the market table is of an earlier date);
+  an input that resolved `unavailable` is left out of its table, and its row
+  then shows `null` and the flag `NO_MARKET_RATE` or `NO_PPP_FACTOR`, never a
+  guess. The market date, and 1 July of the PPP reference year, must be before
+  `effective`.
+- **Exact, each column rounded once,** from the verbatim strings; no column
+  is computed from another, already rounded one, and no inverse rate is
+  formed.
+- **Not anchored.** The record is self-hashed; anchoring is a separate step.
+  The independent verifier recomputes it with its own code
+  (`verify_independent.compare_rate_comparison`).
+
+The two records are linked: the frozen record's `final_value` divided by its
+`last_fx_leg_value_bridged` equals the mean of `declared_over_market`
+weighted by the realized weights at valuation of the source artifact (in the
+example above 0.800625 / 0.739625). The gap of the frozen record is the
+basket-weighted effect of the declared rates that are not proportional to
+the market rates.
+
 ## Corrections and supersession
 
 - **Originals are never rewritten.** Once a vintage is published, its
@@ -590,6 +694,35 @@ section use invented inputs.
   corrected successor stays `current` and carries the warning; a superseded
   vintage keeps its warnings. Warnings can also describe a current vintage's
   known limits (e.g. `PPP_EXTRAPOLATED` on `v0.4-ppp-unwpp`).
+- **A frozen record would be a structured warning (hypothetical scenarios
+  only).** No shipped vintage has a frozen record and `data/vintages.json`
+  holds none: "W" is a fictional scenario identifier, and a hypothetical
+  entry on a real vintage would be a false statement about it. If a
+  whole-basket successor event were ever recorded, its frozen record would
+  enter the registry as one warning on the entry of its source vintage,
+  which the append-only rule already allows, with no change of the registry
+  format:
+
+  ```json
+  {"code": "FX_LEG_FROZEN_AT_CHANGEOVER", "detail": "<text>",
+   "scenario": "…", "event_id": "…", "event_hash": "sha256:…",
+   "effective": "YYYY-MM-DD", "record_hash": "sha256:…",
+   "event_file": "data/<vintage>/<file>", "record_file": "data/<vintage>/<file>"}
+  ```
+
+  The event and the record are new files in the vintage's directory; the
+  vintage's own three files stay byte-identical, and `status` keeps
+  describing supersession only. `test_vintages.py` checks every such warning:
+  exactly these nine keys, each a non-empty string; at most one per event id;
+  both files directly inside the vintage's directory and neither of them one
+  of its own files; the record's `record_hash`, `scenario`, `event_id`,
+  `event_hash` and `effective` equal to the warning's; its
+  `source_artifact_hash` equal to the entry's `artifact_hash`; and the
+  independent verifier reproducing the record from the vintage's spec and
+  the event. "The last vintage before the event" is this registry statement,
+  made by whoever records it; the engine cannot know it. A PPP-valued
+  vintage gets no frozen record (see "Whole-basket successor event"); an
+  ordinary warning (code and detail) would say so.
 
 ## 6. Reference vintages
 
