@@ -330,7 +330,12 @@ ROUNDING_TABLE = [
     (5, 10 ** 9, "5E-9", "exponent notation below 1E-6"),
     (1, 10 ** 6, "0.000001", "the smallest value in plain notation"),
     (1, 10 ** 7, "1E-7", ""),
-    (6400, 100, "64", "an exact integer has no exponent"),
+    (6400, 100, "64", "an exact integer below 1E+50 has no exponent"),
+    (10 ** 49, 1, "1" + "0" * 49, "fifty integer digits: still plain"),
+    (10 ** 50, 1,
+     "1.0000000000000000000000000000000000000000000000000E+50",
+     "an exact value of 1E+50 or more: a 50-digit coefficient and an "
+     "exponent"),
     (600, 1, "600", "trailing zeros of an integer are kept"),
     (10 ** 60, 1,
      "1.0000000000000000000000000000000000000000000000000E+60",
@@ -671,6 +676,22 @@ def test_a_relabelled_spec_is_not_a_declared_numeraire():
     # the correct spec, for contrast, builds and verifies
     assert verify_independent.compare(
         spec_w, worldyard.build_artifact(spec_w)) == []
+
+
+def test_one_declaration_key_alone_is_refused_whatever_the_numeraire():
+    """Either key makes the spec a declared one, and both are then required:
+    also when the numeraire is a conventional code, where no other rule
+    would refuse the spec."""
+    art = worldyard.build_artifact(SPEC_USD)
+    declared = worldyard.redenominate(SPEC_USD, art, W_DECLARATION, "1.25")
+    for key in ("numeraire_declaration", "numeraire_conversion"):
+        for numeraire in ("USD", "EUR", "W"):
+            spec = dict(SPEC_USD, numeraire=numeraire)
+            spec[key] = copy.deepcopy(declared[key])
+            assert _raises_value_error(worldyard.build_artifact, spec), \
+                (key, numeraire)
+            assert _raises_value_error(
+                verify_independent.recompute_artifact, spec), (key, numeraire)
 
 
 def test_undeclared_numeraire_w_is_rejected():
@@ -2133,8 +2154,10 @@ def test_ppp_and_population_inputs_are_resolved_without_the_event():
 # --- nothing depends on the caller's decimal context ----------------------------
 def _hostile_context():
     """A caller's decimal context that differs from the library's in every
-    field that could change a result or raise."""
+    field that could change a result or raise (and has no flag set, so that
+    a flag set by a call would show)."""
     ctx = decimal.getcontext()
+    ctx.clear_flags()
     ctx.capitals = 0                    # would print 6e+1 instead of 6E+1
     ctx.traps[decimal.Inexact] = True   # would raise on any rounding
     ctx.traps[decimal.Rounded] = True
@@ -2211,13 +2234,117 @@ def test_results_do_not_depend_on_the_callers_decimal_context():
     saved = decimal.getcontext().copy()
     try:
         _hostile_context()
+        hostile = _context_fields()
         got = everything()
+        # compared BEFORE this test restores its own context
+        assert _context_fields() == hostile
     finally:
         decimal.setcontext(saved)
     assert got == want
-    # and the caller's context is left exactly as it was
-    assert decimal.getcontext().prec == saved.prec
-    assert decimal.getcontext().capitals == saved.capitals
+
+
+def _context_fields():
+    """Every field of the current decimal context, flags and traps included."""
+    c = decimal.getcontext()
+    return (c.prec, c.rounding, c.Emin, c.Emax, c.capitals, c.clamp,
+            sorted(s.__name__ for s, on in c.flags.items() if on),
+            sorted(s.__name__ for s, on in c.traps.items() if on))
+
+
+def _refused_as_ppp_valued(fn, *a):
+    try:
+        fn(*a)
+    except ValueError as exc:
+        return "PPP-valued" in str(exc)
+    return False
+
+
+def test_ppp_recognition_does_not_depend_on_the_callers_decimal_context():
+    """A PPP-valued vintage is recognised, and refused, whatever the caller's
+    decimal context is, also one that traps Inexact (the recogniser divides
+    1 by each factor and compares exactly)."""
+    spec = _load("data", "v0.4-ppp-unwpp-2026-05-15", "spec.json")
+    art = _load("data", "v0.4-ppp-unwpp-2026-05-15", "artifact.json")
+    event = dict(EVENT, units_per_successor={
+        e["code"]: "2" for e in spec["basket"]})
+    declared = dict(spec, numeraire="W", numeraire_declaration=W_DECLARATION,
+                    numeraire_conversion={
+                        "from": "USD", "units_of_old_per_new": "2",
+                        "source_artifact_hash": art["artifact_hash"],
+                        "source_input_digest": art["input_digest"]})
+    saved = decimal.getcontext().copy()
+    try:
+        for hostile in (False, True):
+            decimal.setcontext(saved.copy())
+            if hostile:
+                _hostile_context()
+            assert worldyard._ppp_valued(spec) is True, hostile
+            assert verify_independent.is_ppp_valued(spec) is True, hostile
+            for fn, args in (
+                    (worldyard.freeze_fx_leg, (spec, event, "2026-05-14")),
+                    (verify_independent.recompute_frozen_record,
+                     (spec, event, "2026-05-14")),
+                    (worldyard.redenominate,
+                     (spec, art, W_DECLARATION, "2")),
+                    (worldyard.build_artifact, (declared,)),
+                    (verify_independent.recompute_artifact, (declared,))):
+                assert _refused_as_ppp_valued(fn, *args), (fn.__name__,
+                                                           hostile)
+    finally:
+        decimal.setcontext(saved)
+
+
+def test_the_callers_decimal_context_is_left_exactly_as_it_was():
+    """No public call changes a field of the caller's decimal context or
+    sets one of its flags, under the default context and under a hostile
+    one. Each comparison is made BEFORE the test restores its own context."""
+    spec03 = _load("data", "v0.3-unwpp-2026-05-15", "spec.json")
+    spec04 = _load("data", "v0.4-ppp-unwpp-2026-05-15", "spec.json")
+    spec_w = _spec_w("1.95583")
+    record = worldyard.freeze_fx_leg(SPEC_USD, EVENT_SIX, VALUATION_DATE)
+    comparison = worldyard.rate_comparison(EVENT_SIX, MARKET, PPP)
+    old_lev = {"observations": [],
+               "fixed_conversion": {
+                   "effective": "2026-01-01",
+                   "units_per_successor": "1.95583",
+                   "successor": {"observations": [
+                       {"date": "2026-01-09", "value": "1.1642"}]}}}
+
+    def calls():
+        art03 = worldyard.build_artifact(spec03)
+        worldyard.verify_artifact(art03, spec03)
+        verify_independent.compare(spec03, art03)
+        worldyard.build_artifact(spec04)
+        verify_independent.recompute_artifact(spec04)
+        art_w = worldyard.build_artifact(spec_w)
+        verify_independent.compare(spec_w, art_w)
+        worldyard.redenominate(SPEC_USD, worldyard.build_artifact(SPEC_USD),
+                               W_DECLARATION, "1.95583")
+        worldyard.freeze_fx_leg(SPEC_USD, EVENT_SIX, VALUATION_DATE)
+        verify_independent.compare_frozen_record(SPEC_USD, EVENT_SIX, record)
+        worldyard.rate_comparison(EVENT_SIX, MARKET, PPP)
+        verify_independent.compare_rate_comparison(EVENT_SIX, MARKET, PPP,
+                                                   comparison)
+        worldyard.resolve_input("2026-01-09", old_lev, 4)
+        worldyard.resolve_input("2100-01-01", old_lev, 4, None, EVENT)
+        worldyard._ppp_valued(spec04)
+        verify_independent.is_ppp_valued(spec04)
+
+    saved = decimal.getcontext().copy()
+    try:
+        for hostile in (False, True):
+            decimal.setcontext(saved.copy())
+            decimal.getcontext().clear_flags()
+            if hostile:
+                ctx = decimal.getcontext()
+                ctx.prec, ctx.rounding, ctx.capitals = 7, decimal.ROUND_UP, 0
+                ctx.Emax, ctx.Emin = 60, -60
+            before = _context_fields()
+            calls()
+            assert _context_fields() == before, (hostile, before,
+                                                 _context_fields())
+    finally:
+        decimal.setcontext(saved)
 
 
 # --- rate comparison (information only) ------------------------------------------
@@ -2640,6 +2767,39 @@ def test_a_malformed_rate_comparison_is_a_difference_not_an_exception():
     assert diffs and diffs[0][0] == "record_hash (internal integrity)"
 
 
+def test_a_record_with_keys_that_are_not_strings_is_a_difference():
+    """A record that is not plain JSON data (here: keys that are not
+    strings, possible only in a Python object) is reported as a difference,
+    never an exception."""
+    record = worldyard.freeze_fx_leg(SPEC_USD, EVENT, VALUATION_DATE)
+    placeholder = "<the record is not plain JSON data>"
+    odd = dict(record)
+    odd[1] = "x"
+    diffs = verify_independent.compare_frozen_record(SPEC_USD, EVENT, odd)
+    assert (1, "<unexpected>", "x") in diffs, diffs
+    assert ("record_hash (internal integrity)", placeholder,
+            record["record_hash"]) in diffs, diffs
+    nested = copy.deepcopy(record)
+    nested["comparison"][None] = "x"
+    diffs = verify_independent.compare_frozen_record(SPEC_USD, EVENT, nested)
+    assert ("comparison.None", "<unexpected>", "x") in diffs, diffs
+    rates = worldyard.rate_comparison(EVENT, MARKET, PPP)
+    odd = dict(rates)
+    odd[(1, 2)] = "x"
+    diffs = verify_independent.compare_rate_comparison(EVENT, MARKET, PPP,
+                                                       odd)
+    assert ((1, 2), "<unexpected>", "x") in diffs, diffs
+    nested = copy.deepcopy(rates)
+    nested["rows"][0][2.5] = "x"
+    diffs = verify_independent.compare_rate_comparison(EVENT, MARKET, PPP,
+                                                       nested)
+    assert ("rows[0].2.5", "<unexpected>", "x") in diffs, diffs
+    # string keys keep their order
+    assert [d[0] for d in verify_independent.compare_frozen_record(
+        SPEC_USD, EVENT, dict(record, final_value="1", flags=[]))] == [
+        "record_hash (internal integrity)", "final_value", "flags.length"]
+
+
 def test_rate_comparison_agrees_on_random_inputs():
     """Seeded random events and tables: the engine, the independent verifier
     and the test-side integer rounding give the same strings."""
@@ -2710,9 +2870,12 @@ def test_rate_comparison_leaves_inputs_and_the_callers_context_alone():
 
 
 def test_gap_of_the_frozen_record_is_the_weighted_mean_of_the_ratios():
-    """The link between the two records: final_value / bridged value equals
-    the mean of declared_over_market weighted by the realized weights at
-    valuation. Both are comparisons only."""
+    """The link between the two records, when the market table holds the
+    spec's valuation rates: final_value / bridged value equals the mean of
+    declared_over_market weighted by the valuation contributions
+    fixed_amount x fx_valuation_usd_per_unit (exactly here, where no value
+    was rounded); with the published, rounded weights it holds to about 50
+    digits. Both are comparisons only."""
     art = worldyard.build_artifact(SPEC_USD)
     rec = worldyard.freeze_fx_leg(SPEC_USD, EVENT, VALUATION_DATE)
     rows = {r["code"]: r for r in
@@ -2723,16 +2886,25 @@ def test_gap_of_the_frozen_record_is_the_weighted_mean_of_the_ratios():
     total = sum(contrib.values())
     mean = sum(contrib[c] / total * Fraction(rows[c]["declared_over_market"])
                for c in contrib)
-    assert mean == (Fraction(rec["final_value"])
-                    / Fraction(rec["comparison"]["last_fx_leg_value_bridged"]))
-    assert mean == Fraction("0.800625") / Fraction("0.739625")
+    ratio = (Fraction(rec["final_value"])
+             / Fraction(rec["comparison"]["last_fx_leg_value_bridged"]))
+    assert mean == ratio == Fraction("0.800625") / Fraction("0.739625")
+    # the published realized_weight_at_valuation strings are rounded to 50
+    # digits (their sum is 1 - 2E-51): the identity then holds to about 50
+    # digits, not exactly
+    published = sum(Fraction(r["realized_weight_at_valuation"])
+                    * Fraction(rows[r["code"]]["declared_over_market"])
+                    for r in art["basket"])
+    assert published != ratio
+    assert abs(published - ratio) < Fraction(1, 10 ** 49)
 
 
 # --- the independent verifier's command line ----------------------------------------
-def _verifier_cli(words, files):
+def _verifier_cli(words, files, with_stderr=False):
     """Run verify_independent.py with `files` (name -> JSON value, or bytes
     written as they are) in a temporary directory. In `words`, "@name" is the
-    path of that file. Return (exit code, stdout)."""
+    path of that file. Return (exit code, stdout), and stderr as a third item
+    when `with_stderr`."""
     with tempfile.TemporaryDirectory() as tmp:
         paths = {}
         for name, value in files.items():
@@ -2748,6 +2920,9 @@ def _verifier_cli(words, files):
         proc = subprocess.run(
             [sys.executable, os.path.join(HERE, "verify_independent.py")]
             + argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if with_stderr:
+            return (proc.returncode, proc.stdout.decode("utf-8"),
+                    proc.stderr.decode("utf-8"))
         return proc.returncode, proc.stdout.decode("utf-8")
 
 
@@ -2842,6 +3017,148 @@ def test_verifier_command_line_checks_the_records():
     code, out = _verifier_cli(with_frozen, dict(
         files, spec=spec_w, art=worldyard.build_artifact(spec_w)))
     assert code == 2 and out.startswith("ERROR"), out
+
+
+def test_a_file_with_a_repeated_key_is_refused():
+    """A JSON object with a repeated key is not a valid spec, artifact,
+    event, table or record (ARTIFACT_FORMAT.md section 2). Python keeps the
+    last value and another reader may keep the first, so a file whose first
+    value is forged and whose last value is right would verify; the
+    verifier and the CLI refuse such a file instead."""
+    art = worldyard.build_artifact(SPEC_USD)
+    frozen = worldyard.freeze_fx_leg(SPEC_USD, EVENT, VALUATION_DATE)
+    comparison = worldyard.rate_comparison(EVENT, MARKET, PPP)
+    files = {"spec": SPEC_USD, "art": art, "event": EVENT, "frozen": frozen,
+             "market": MARKET, "ppp": PPP, "cmp": comparison}
+    everything = ["@spec", "@art", "--event", "@event",
+                  "--frozen-record", "@frozen", "--market", "@market",
+                  "--ppp", "@ppp", "--rate-comparison", "@cmp"]
+    code, out = _verifier_cli(everything, files)
+    assert code == 0, out
+
+    def repeated(name, value, old, new):
+        text = json.dumps(value, ensure_ascii=False)
+        assert text.count(old) == 1, (name, old)
+        return text.replace(old, new + ", " + old).encode("utf-8")
+
+    forged = {
+        "art": repeated("art", art, '"value_usd": "0.92453125"',
+                        '"value_usd": "7"'),
+        "spec": repeated("spec", SPEC_USD, '"population": "400"',
+                         '"population": "4"'),
+        "frozen": repeated("frozen", frozen, '"final_value": "0.800625"',
+                           '"final_value": "999999"'),
+        "event": repeated("event", EVENT, '"scenario": "hypothetical"',
+                          '"scenario": "real"'),
+        "cmp": repeated("cmp", comparison, '"information_only": true',
+                        '"information_only": false'),
+        "market": repeated("market", MARKET, '"date": "2099-12-31"',
+                           '"date": "1999-12-31"'),
+        "ppp": repeated("ppp", PPP, '"reference_year": "2099"',
+                        '"reference_year": "1999"'),
+    }
+    for name, text in forged.items():
+        code, out = _verifier_cli(everything, dict(files, **{name: text}))
+        assert code == 2 and out.startswith("ERROR") \
+            and "twice" in out, (name, code, out)
+    # the CLI: verify and show refuse the file too
+    with tempfile.TemporaryDirectory() as tmp:
+        sp = os.path.join(tmp, "spec.json")
+        ap = os.path.join(tmp, "artifact.json")
+        with open(sp, "w", encoding="utf-8") as fh:
+            json.dump(SPEC_USD, fh)
+        with open(ap, "wb") as fh:
+            fh.write(forged["art"])
+        for words in (["verify", ap, sp], ["show", ap]):
+            proc = subprocess.run(
+                [sys.executable, os.path.join(HERE, "cli.py")] + words,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            assert proc.returncode == 1, (words, proc.returncode)
+            assert b"VERIFIED" not in proc.stdout and b"0.924531" \
+                not in proc.stdout and b"twice" in proc.stderr, words
+
+
+def test_numbers_in_an_event_declaration():
+    """An event's free-form declaration is hashed as Python's json module
+    writes it, so numbers there are best given as strings; NaN and the
+    infinities are not JSON and are refused wherever the event is hashed."""
+    rec = worldyard.freeze_fx_leg(SPEC_USD, EVENT, VALUATION_DATE)
+    good = worldyard.rate_comparison(EVENT, MARKET, PPP)
+    for value in (float("nan"), float("inf"), float("-inf")):
+        ev = _event(declaration={"x": value})
+        assert _raises_value_error(worldyard.freeze_fx_leg, SPEC_USD, ev,
+                                   VALUATION_DATE), value
+        assert _raises_value_error(
+            verify_independent.recompute_frozen_record, SPEC_USD, ev,
+            VALUATION_DATE), value
+        assert _raises_value_error(
+            verify_independent.compare_frozen_record, SPEC_USD, ev, rec), value
+        assert _raises_value_error(worldyard.rate_comparison, ev, MARKET,
+                                   PPP), value
+        assert _raises_value_error(
+            verify_independent.recompute_rate_comparison, ev, MARKET, PPP), \
+            value
+        assert _raises_value_error(
+            verify_independent.compare_rate_comparison, ev, MARKET, PPP,
+            good), value
+    # the command line: an event file holding NaN is an error, not a PASS
+    code, out = _verifier_cli(
+        ["@spec", "@art", "--event", "@event", "--frozen-record", "@frozen"],
+        {"spec": SPEC_USD, "art": worldyard.build_artifact(SPEC_USD),
+         "event": json.dumps(_event(declaration={"x": float("nan")}))
+         .encode("utf-8"), "frozen": rec})
+    assert code == 2 and out.startswith("ERROR"), out
+    # finite JSON numbers are accepted, and hashed as Python writes them
+    one = worldyard.freeze_fx_leg(SPEC_USD, _event(declaration={"x": 1}),
+                                  VALUATION_DATE)
+    one_f = worldyard.freeze_fx_leg(SPEC_USD, _event(declaration={"x": 1.0}),
+                                    VALUATION_DATE)
+    text = worldyard.freeze_fx_leg(SPEC_USD, _event(declaration={"x": "1"}),
+                                   VALUATION_DATE)
+    assert len({one["event_hash"], one_f["event_hash"],
+                text["event_hash"]}) == 3
+    assert one["final_value"] == one_f["final_value"] == "0.800625"
+    assert b'"x":1e+22' in worldyard.canonical(
+        _event(declaration={"x": 1e22}))
+    for r, d in ((one, {"x": 1}), (one_f, {"x": 1.0})):
+        assert verify_independent.compare_frozen_record(
+            SPEC_USD, _event(declaration=d), r) == []
+
+
+def test_verifier_command_line_never_ends_in_a_traceback():
+    """Malformed inputs end with exit 2 and one ERROR line; a record nested
+    too deeply to print is still reported (exit 1), or, where the JSON
+    reader itself gives up, refused (exit 2). Never a traceback."""
+    art = worldyard.build_artifact(SPEC_USD)
+    frozen = worldyard.freeze_fx_leg(SPEC_USD, EVENT, VALUATION_DATE)
+    files = {"spec": SPEC_USD, "art": art, "event": EVENT, "frozen": frozen}
+    base = ["@spec", "@art"]
+    with_frozen = base + ["--event", "@event", "--frozen-record", "@frozen"]
+    bad_population = copy.deepcopy(SPEC_USD)
+    bad_population["basket"][0]["population"] = "abc"
+    for words, changed in (
+            (base, {"spec": [SPEC_USD]}),
+            (base, {"art": [art]}),
+            (base, {"art": "x"}),
+            (base, {"spec": bad_population}),
+            (base, {"spec": dict(SPEC_USD, basket=[1])}),
+            (with_frozen, {"event": [EVENT]})):
+        code, out, err = _verifier_cli(words, dict(files, **changed),
+                                       with_stderr=True)
+        assert code == 2 and out.startswith("ERROR") \
+            and "Traceback" not in err, (changed.keys(), code, out, err)
+        assert len(out.strip().splitlines()) == 1, out
+    deep = ("[" * 100000 + "]" * 100000).encode("ascii")
+    deep_value = json.dumps(dict(art, extra=None)).replace(
+        "null", "[" * 100000 + "]" * 100000).encode("ascii")
+    for words, changed, title in (
+            (with_frozen, {"frozen": deep}, "FROZEN RECORD: FAIL"),
+            (base, {"art": deep_value}, "INDEPENDENT VERIFICATION: FAIL")):
+        code, out, err = _verifier_cli(words, dict(files, **changed),
+                                       with_stderr=True)
+        assert "Traceback" not in err, err[-300:]
+        assert (code == 1 and title in out) \
+            or (code == 2 and out.startswith("ERROR")), (code, out[-300:])
 
 
 # --- the registry rule for frozen records -----------------------------------------

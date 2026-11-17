@@ -256,10 +256,12 @@ def _round50(p, q):
     """The exact rational p / q (integers, q > 0) rounded ONCE to 50
     significant digits, ties to even, as the decimal string every hash uses.
 
-    An exact result is written in its shortest form (1281/1600 -> "0.800625",
-    6400/100 -> "64"); a rounded one has 50 digits; exponent notation appears
-    where str(Decimal) uses it ("5E-9"). The string depends only on the value
-    p / q, not on how the fraction is written."""
+    An exact result below 1E+50 is written in its shortest form (1281/1600 ->
+    "0.800625", 6400/100 -> "64"); a rounded one has 50 digits, and so has an
+    exact one of 1E+50 or more, which is written with a 50-digit coefficient
+    and an exponent (10**50 -> "1.000...000E+50", 49 zeros after the point);
+    exponent notation appears where str(Decimal) uses it ("5E-9"). The string
+    depends only on the value p / q, not on how the fraction is written."""
     if q <= 0:
         raise ValueError("denominator must be > 0")
     g = _gcd(p, q)
@@ -863,11 +865,14 @@ FROZEN_NOTICE = (
 
 
 def _event_hash(event):
-    """sha256 of the canonical event (a validated event whose optional
-    `declaration` holds something that is not JSON data is refused)."""
+    """sha256 of the canonical event. A validated event whose optional
+    `declaration` holds something that is not JSON data (a set, bytes, keys
+    that cannot be sorted, NaN or an infinity) is refused: its canonical
+    bytes would not be JSON."""
     try:
+        json.dumps(event, allow_nan=False)   # NaN and infinity are not JSON
         return sha256(event)
-    except TypeError:
+    except (TypeError, ValueError):
         raise ValueError("the event's declaration is not plain JSON data")
 
 

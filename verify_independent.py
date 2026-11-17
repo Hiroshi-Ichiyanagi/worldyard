@@ -49,8 +49,9 @@ Exit status:
     0   the published artifact matches the independent recomputation exactly
         (every field, both hashes), and so does every requested record
     1   verification failed; each differing field is listed on stdout
-    2   operational error (unreadable file, invalid JSON, malformed spec,
-        event or table, a flag without the flags it needs)
+    2   operational error (unreadable file, invalid JSON, an object with a
+        repeated key, malformed spec, event or table, a flag without the
+        flags it needs)
 
 > Don't trust me. Verify me.  -- so here is the second pair of eyes.
 """
@@ -100,6 +101,18 @@ def hash_of(value):
     return "sha256:" + hashlib.sha256(canonical_bytes(value)).hexdigest()
 
 
+def event_hash_of(event):
+    """hash_of(event) for a validated event (ARTIFACT_FORMAT.md section 10).
+    An event whose free-form `declaration` holds something that is not JSON
+    data (a set, bytes, keys that cannot be sorted, NaN or an infinity) is
+    refused with ValueError: its canonical bytes would not be JSON."""
+    try:
+        json.dumps(event, allow_nan=False)   # NaN and infinity are not JSON
+        return hash_of(event)
+    except (TypeError, ValueError):
+        raise ValueError("the event declaration is not plain JSON data")
+
+
 # --- exact values and the single rounding (ARTIFACT_FORMAT.md section 1) -----
 # The numbers of a declared-numeraire artifact and of a frozen record are
 # exact rational expressions over verbatim decimal strings, rounded once.
@@ -140,7 +153,9 @@ def exact_published(text, what="published number"):
 def round_once(value):
     """An exact Fraction, rounded once to 50 significant digits (ties to
     even) and written as the decimal string the format uses: the shortest
-    form when the value is exact, 50 digits otherwise."""
+    form when the value is exact and below 1E+50, 50 digits otherwise (an
+    exact value of 1E+50 or more has a 50-digit coefficient and an
+    exponent)."""
     with localcontext(fixed_context()):
         return str(Decimal(value.numerator) / Decimal(value.denominator))
 
@@ -508,10 +523,7 @@ def recompute_frozen_record(spec, event, valuation_date):
         comparison = None
         flags = ["FROZEN_AT_CHANGEOVER", "NO_BRIDGE_RATE"]
 
-    try:
-        event_hash = hash_of(event)
-    except TypeError:
-        raise ValueError("the event declaration is not plain JSON data")
+    event_hash = event_hash_of(event)
     body = {
         "format": "worldyard-frozen-record-1",
         "kind": "frozen_fx_leg",
@@ -540,11 +552,20 @@ def recompute_frozen_record(spec, event, valuation_date):
 
 
 # --- field-by-field comparison ------------------------------------------------
+def _key_order(key):
+    """Sort key of _walk_diffs: string keys in their usual order, then any
+    other key (possible only in a Python object, never in a JSON file) by
+    its repr, so that such a key is reported instead of raising TypeError."""
+    if isinstance(key, str):
+        return (0, key)
+    return (1, repr(key))
+
+
 def _walk_diffs(expected, published, path, out):
     """Collect every (path, expected, published) difference between the two
     JSON values, recursing into objects and arrays."""
     if isinstance(expected, dict) and isinstance(published, dict):
-        for key in sorted(set(expected) | set(published)):
+        for key in sorted(set(expected) | set(published), key=_key_order):
             here = "%s.%s" % (path, key) if path else key
             if key not in published:
                 out.append((here, expected[key], "<missing>"))
@@ -749,10 +770,7 @@ def recompute_rate_comparison(event, market, ppp):
             row["flags"].append("NO_PPP_FACTOR")
         rows.append(row)
 
-    try:
-        event_hash = hash_of(event)
-    except TypeError:
-        raise ValueError("the event declaration is not plain JSON data")
+    event_hash = event_hash_of(event)
     body = {
         "format": "worldyard-rate-comparison-1",
         "kind": "rate_comparison",
@@ -834,17 +852,39 @@ def is_ppp_valued(spec):
 FICTIONAL_UNIT_NOTE = "(fictional scenario identifier, not a currency)"
 
 
+def _object_without_repeated_keys(pairs):
+    """object_pairs_hook of _read_json: a JSON object with a repeated key is
+    not a valid spec, artifact, event, table or record (ARTIFACT_FORMAT.md
+    section 2). Python would keep the last value and another reader may keep
+    the first, so such a file is refused instead of being read one way."""
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError("an object has the key %r twice" % (key,))
+        obj[key] = value
+    return obj
+
+
 def _read_json(path):
     with open(path, "r", encoding="utf-8") as fh:
-        return json.load(fh)
+        return json.load(fh, object_pairs_hook=_object_without_repeated_keys)
+
+
+def _shown(value):
+    """The text of a value in a difference; a value nested too deeply for
+    the interpreter to print is shown as a placeholder."""
+    try:
+        return "%s" % (value,)
+    except RecursionError:
+        return "<a value nested too deeply to print>"
 
 
 def _print_fail(title, diffs):
     print("%s: FAIL  (%d field(s) differ)" % (title, len(diffs)))
     for where, want, got in diffs:
         print("  field    : %s" % where)
-        print("    expected : %s" % (want,))
-        print("    published: %s" % (got,))
+        print("    expected : %s" % _shown(want))
+        print("    published: %s" % _shown(got))
 
 
 def _print_artifact_pass(args, spec, artifact):
@@ -938,6 +978,9 @@ def main(argv=None):
                                                     record)))
     except (OSError, ValueError, KeyError, TypeError) as exc:
         print("ERROR: %s" % exc)
+        return 2
+    except (ArithmeticError, AttributeError, RecursionError) as exc:
+        print("ERROR: malformed input (%s: %s)" % (type(exc).__name__, exc))
         return 2
 
     status = 0

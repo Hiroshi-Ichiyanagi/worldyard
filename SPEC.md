@@ -246,7 +246,11 @@ scenario identifier, not a currency)"; no hashed field changes.
 
 What this does not show: that a declared rate is authentic, right or fair, or
 that anything will ever be converted. The engine cannot authenticate a
-declaration; it can only bind the hashes and do the arithmetic.
+declaration; it can only bind the hashes and do the arithmetic. A successful
+verification shows that the artifact restates the source artifact whose
+hashes the spec carries. It does not show that this source is a particular
+published artifact: compare `source_artifact_hash` with the published
+`artifact_hash`, obtained elsewhere.
 
 ## 5. Verification
 
@@ -663,12 +667,16 @@ declared_over_ppp             = R50( u[USD] / u[code] × factor[code] )
   The independent verifier recomputes it with its own code
   (`verify_independent.compare_rate_comparison`).
 
-The two records are linked: the frozen record's `final_value` divided by its
-`last_fx_leg_value_bridged` equals the mean of `declared_over_market`
-weighted by the realized weights at valuation of the source artifact (in the
-example above 0.800625 / 0.739625). The gap of the frozen record is the
-basket-weighted effect of the declared rates that are not proportional to
-the market rates.
+The two records are linked when the spec's numeraire is USD and the market
+table holds the spec's valuation rates: the frozen record's `final_value`
+divided by its `last_fx_leg_value_bridged` equals the mean of
+`declared_over_market` weighted by the valuation contributions
+(`fixed_amount` × `fx_valuation_usd_per_unit`) of the source artifact's rows;
+exactly where no value involved was rounded (the example above: 0.800625 /
+0.739625), and to about 50 digits otherwise or with the published, rounded
+`realized_weight_at_valuation` strings. The gap of the frozen record is then
+the basket-weighted effect of the declared rates that are not proportional
+to the market rates.
 
 ## Corrections and supersession
 

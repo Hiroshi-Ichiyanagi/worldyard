@@ -25,9 +25,21 @@ import worldyard
 import anchor as anchor_mod
 
 
+def _object_without_repeated_keys(pairs):
+    """A JSON object with a repeated key is not a valid spec, artifact or
+    anchor record (ARTIFACT_FORMAT.md section 2): Python would keep the last
+    value and another reader may keep the first. Refuse it."""
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError("an object has the key %r twice" % (key,))
+        obj[key] = value
+    return obj
+
+
 def _load(path):
     with open(path, "r", encoding="utf-8") as fh:
-        return json.load(fh)
+        return json.load(fh, object_pairs_hook=_object_without_repeated_keys)
 
 
 def _dump(obj, path=None):

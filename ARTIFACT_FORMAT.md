@@ -92,12 +92,16 @@ rational** expression over decimal strings, rounded **once** at the end.
 - `R50(x)` is the exact rational `x` rounded once to 50 significant digits,
   ties to even, and written as `str(Decimal(p) / Decimal(q))` for integers
   `p`, `q > 0` with `x = p / q`, under the context above. The string depends
-  only on the value `x`, not on how the fraction is written.
+  only on the value `x`, not on how the fraction is written. An exact value
+  below 1E+50 is written in its shortest form; an exact value of 1E+50 or
+  more is written with a 50-digit coefficient and an exponent, as `str()`
+  writes such a quotient.
 
 | exact value | `R50` | note |
 |---|---|---|
 | 1281/1600 | `0.800625` | exact: the shortest form |
-| 6400/100 | `64` | an exact integer has no exponent |
+| 6400/100 | `64` | an exact integer below 1E+50 has no exponent |
+| 10^50 | `1.0000000000000000000000000000000000000000000000000E+50` | exact, 1E+50 or more: a 50-digit coefficient and an exponent |
 | (10^50+5)/10^50 | `1.0000000000000000000000000000000000000000000000000` | half-way, kept digit even: stays |
 | (10^50+15)/10^50 | `1.0000000000000000000000000000000000000000000000002` | half-way, kept digit odd: up |
 | (10^51+51)/10^51 | `1.0000000000000000000000000000000000000000000000001` | just above half-way |
@@ -136,6 +140,16 @@ json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 That is: keys sorted lexicographically, no insignificant whitespace, non-ASCII
 emitted literally (not `\uXXXX`). **Hashing always uses this canonical form**,
 regardless of how the file is pretty-printed on disk.
+
+An object with a repeated key is not a valid spec, artifact, event, table or
+record. Python's `json` module keeps the last of the repeated values and
+another reader may keep the first, so one file could be read two ways; the
+reference verifier refuses such a file (exit 2) and so does the CLI.
+
+A number in free-form provenance (the extra keys of a spec, §4, and an
+event's `declaration`, §10) is hashed as Python's `json` module writes it:
+`1e22` is written `1e+22`, and `1` and `1.0` are different bytes, which
+another language may not reproduce. Give such numbers as strings.
 
 Files under `data/` are written pretty-printed (`indent=2`, `ensure_ascii=False`,
 trailing newline) for human review. The pretty bytes are **not** what gets
@@ -208,8 +222,10 @@ with an undeclared numeraire. A declared spec is accepted only if
 
 Otherwise no artifact is produced. So a spec that only renames its numeraire,
 with or without the declaration, is rejected; and the basket, the rates or the
-provenance of a declared spec cannot be edited without breaking the binding to
-its source artifact. The rate fields of the basket entries (§5) are not
+provenance of a declared spec cannot be edited without changing the two
+hashes it carries. The binding is to whatever source spec the declared spec
+itself describes: which published artifact that source is, the spec cannot
+show (§6.1). The rate fields of the basket entries (§5) are not
 re-expressed: they stay in the old numeraire, under their names.
 
 ## 5. Basket entry (spec)
@@ -269,9 +285,13 @@ A declared numeraire **restates the published values and nothing else**: each
 value field is the source's published string divided once by one declared
 rate, and the rows (quantities and weights, none of which depends on a
 numeraire) are the source's rows. The unit is the same basket. Anyone can
-check the claim "this is that artifact, restated" from the declared spec
-alone: remove the two keys, restore the old numeraire, rebuild, compare the
-two hashes.
+check from the declared spec alone that it restates the source artifact whose
+hashes it carries: remove the two keys, restore the old numeraire, rebuild,
+compare the two hashes. A successful verification shows that the artifact
+restates the source artifact whose hashes the spec carries. It does not show
+that this source is a particular published artifact: compare
+`source_artifact_hash` with the published `artifact_hash`, obtained
+elsewhere.
 
 ## 7. Basket row (artifact)
 
@@ -419,7 +439,11 @@ inverted.
 `event_hash = "sha256:" + sha256(canonical(event)).hexdigest()` with the
 encoding of §2. The order of the keys therefore does not matter, and every
 rate text, the date, the identifiers and the optional `declaration` are bound
-by the hash. Binding a text does not authenticate it.
+by the hash. Binding a text does not authenticate it. Give numbers inside
+`declaration` as strings: a JSON number is hashed as Python's `json` module
+writes it (§2). NaN and the infinities are not JSON: an event whose
+`declaration` holds one, or holds anything else that is not JSON data, is
+refused wherever the event is hashed (no record is produced).
 
 The example of `SPEC.md` (illustrative values) has `event_hash
 sha256:ff43b2b3…0c17`.
@@ -640,10 +664,14 @@ With the six-figure rates of §11 the CNY row reads
 `2.9816436138344434162605170765766658485236074925643` and
 `1.1926574455337773665042068306306663394094429970257`.
 
-The link to the frozen record (§11): `final_value` divided by
+The link to the frozen record (§11), when the spec's numeraire is USD and the
+market table holds the spec's valuation rates: `final_value` divided by
 `last_fx_leg_value_bridged` equals the mean of `declared_over_market`
-weighted by the realized weights at valuation of the source artifact (in the
-example 0.800625 / 0.739625). Both are comparisons only.
+weighted by the valuation contributions `Q(fixed_amount_i) ×
+Q(fx_valuation_usd_per_unit_i)` of the source artifact's rows (exactly where
+no value involved was rounded, as in the example: 0.800625 / 0.739625; with
+the published, rounded `realized_weight_at_valuation` strings, to about 50
+digits). Both are comparisons only.
 
 **Verifying a record.** A record reproduces iff recomputing it from the
 event and the two tables gives the identical object and its `record_hash` is
