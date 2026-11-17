@@ -24,6 +24,7 @@ verify: guard
 	$(PYTHON) test_properties.py
 	$(PYTHON) test_fallbacks.py
 	$(PYTHON) test_compat.py
+	$(PYTHON) test_changeover.py
 	$(MAKE) verify-independent
 	$(PYTHON) worldyard.py
 

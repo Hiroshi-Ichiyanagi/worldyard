@@ -24,7 +24,10 @@ formats, and the verification procedure. The byte-level field layout lives in
 counts *people* equally instead of tying it to the issuer of any single national
 currency. The reference value is reported in a numeraire (USD here) only as a
 readable denomination; the *unit itself* is defined by the basket, not by any
-single national currency.
+single national currency. Stating the value in another numeraire therefore
+never changes the basket: a declared numeraire (§4.4, hypothetical scenarios
+only) restates the published values and leaves every pinned quantity as it
+is.
 
 **Non-goals.** Worldyard is not a currency, token, stablecoin, or settlement
 rail. It does not predict returns and gives no financial advice. A vintage
@@ -100,15 +103,25 @@ value is in international dollars (PPP-adjusted US dollars), as the vintage's
 valuation leg exactly: every basket entry records `ppp_factor_lcu_per_intl_usd`
 and its `fx_valuation_usd_per_unit` equals `1 / ppp_factor_lcu_per_intl_usd`.
 From an artifact alone (`show`) the only hint is the token `PPP` in
-`weight_vintage_label`. No hashed field changes.
+`weight_vintage_label`. No hashed field changes. At a whole-basket successor
+event (hypothetical scenarios only) a PPP vintage is neither frozen nor
+re-denominated; see "The PPP valuation leg at the event".
 
 ## 3. Determinism
 
 - **stdlib only** (`json`, `hashlib`, `decimal`).
 - **Exact arithmetic** with `decimal.Decimal`, precision **50**, rounding
   **ROUND_HALF_EVEN**, inside an isolated `localcontext` (the caller's global
-  context is never modified). All numeric inputs are parsed from **strings**,
-  never from floats.
+  context is never modified, and never read: every field of the context is
+  stated, `ARTIFACT_FORMAT.md` §1, so a caller who changed its own decimal
+  context gets the same bytes). All numeric inputs are parsed from
+  **strings**, never from floats.
+- **Exact values, rounded once.** The numbers of a declared-numeraire artifact
+  (§4.4) are exact rational expressions over verbatim decimal strings, rounded
+  once to 50 significant digits, ties to even (`ARTIFACT_FORMAT.md` §1.1). A
+  value is divided by a declared rate; an inverse rate is never formed. The
+  engine does this with integers only; the independent verifier with
+  `fractions.Fraction`.
 - **No wall clock.** The implementation never imports or calls `datetime` or
   `time`; the result depends only on the inputs, never on when it runs.
 - **Canonical encoding** for every hash: `json.dumps(obj, sort_keys=True,
@@ -129,7 +142,9 @@ pinned realized weights equal to population shares at precision 60.
 A spec is a JSON object with: `method` (`"worldyard"`; `"openunit"` in every
 spec written before the rename, and the meaning of an absent `method`; any
 other name is rejected), `method_version`
-(`"v0"`, `"v0.1"`, `"v0.2"`, …, `"v0.4"`), `numeraire`, a `weight_vintage` object
+(`"v0"`, `"v0.1"`, `"v0.2"`, …, `"v0.4"`), `numeraire` (three upper-case ASCII
+letters, `"USD"` if absent; any other numeraire must be declared, §4.4), a
+`weight_vintage` object
 (`label`, `basis`, and free-form provenance), and a `basket` array. Each basket
 entry has `code`, optional `name`, `population` (decimal string),
 `fx_baseline_usd_per_unit`, `fx_valuation_usd_per_unit`, and optionally
@@ -152,7 +167,10 @@ decimal **strings**.
 | `artifact_hash` | SHA-256 of the artifact excluding this field |
 
 All numbers are stored as exact decimal **strings**. The precise byte-level
-rules are in [`ARTIFACT_FORMAT.md`](ARTIFACT_FORMAT.md).
+rules are in [`ARTIFACT_FORMAT.md`](ARTIFACT_FORMAT.md). An artifact with a
+declared numeraire has `baseline_value` and `value` in place of the two
+`*_usd` fields, plus the declaration and the conversion it was built with
+(§4.4).
 
 ### 4.3 Backward compatibility
 
@@ -167,6 +185,73 @@ every vintage built before the rename rebuilds byte for byte
 (`test_compat.py`). `import openunit` and the `openunit` command remain as
 deprecated aliases of `worldyard`.
 
+### 4.4 Declared numeraire (hypothetical scenarios only)
+
+> This is for thought experiments: what the unit would read in a single
+> successor unit if one were ever declared. **"W" in the examples is a
+> fictional scenario identifier, not a currency code.** It is not a forecast,
+> not a proposal or an offer of any currency, and not a claim of regulatory
+> compliance.
+
+A numeraire that is not three upper-case letters must be **declared**. The
+spec then carries two more keys:
+
+```json
+"numeraire": "W",
+"numeraire_declaration": {"code": "W",
+                          "kind": "fictional_scenario_identifier",
+                          "scenario": "hypothetical"},
+"numeraire_conversion": {"from": "USD",
+                         "units_of_old_per_new": "1.25",
+                         "source_artifact_hash": "sha256:…",
+                         "source_input_digest": "sha256:…"}
+```
+
+- The code is a *fictional identifier*: 1 to 16 ASCII letters and digits, at
+  least one letter, never exactly three letters. So it cannot be taken for a
+  currency code, and a three-letter numeraire cannot be declared fictional.
+- `units_of_old_per_new` is the number of units of the old numeraire equal to
+  **one** unit of the new one, as a plain decimal string kept verbatim. Values
+  are divided by it. The other direction cannot be expressed and is never
+  derived.
+- The two hashes are those of the **source artifact**: the artifact of the
+  same spec without the two keys and with the old numeraire. The engine
+  rebuilds it and rejects the spec unless both hashes match.
+
+The artifact keeps every basket row of the source artifact and restates its two
+values, each divided once by the declared rate and rounded once:
+
+```
+baseline_value = R50( source.baseline_value_usd / units_of_old_per_new )
+value          = R50( source.value_usd          / units_of_old_per_new )
+```
+
+This is all a declared numeraire does: it changes the unit in which the
+published values are stated and alters nothing else. The rate fields of the
+spec stay in the old numeraire. A spec that only renames its numeraire is
+rejected, with or without the declaration, because its values would still be
+values in the old numeraire. A PPP-valued spec (§2.3) cannot carry a declared
+numeraire: its value is in international dollars, not an amount of any
+currency that a declared rate converts.
+
+`worldyard.redenominate(spec, artifact, declaration, units_of_old_per_new)`
+returns the declared spec for a spec and the artifact built from it. Example on
+illustrative inputs: a value of `0.92453125` USD at 1.25 USD per W reads
+`0.739625` W, and the baseline `1.000000` reads `0.8` W; the six pinned
+quantities are the same six strings.
+
+For display only, the CLI (`build`, `show`), the demo and
+`verify_independent.py` print the unit of such an artifact as "W (fictional
+scenario identifier, not a currency)"; no hashed field changes.
+
+What this does not show: that a declared rate is authentic, right or fair, or
+that anything will ever be converted. The engine cannot authenticate a
+declaration; it can only bind the hashes and do the arithmetic. A successful
+verification shows that the artifact restates the source artifact whose
+hashes the spec carries. It does not show that this source is a particular
+published artifact: compare `source_artifact_hash` with the published
+`artifact_hash`, obtained elsewhere.
+
 ## 5. Verification
 
 `verify_artifact(artifact, spec)` returns `True` iff **all** hold:
@@ -179,6 +264,11 @@ deprecated aliases of `worldyard`.
 
 Any single-field tamper breaks (2) and/or (3). From the command line:
 `worldyard verify artifact.json spec.json` (exit 0 on success, 1 on failure).
+
+A spec that the rules reject produces no artifact, so there is nothing to
+compare: an unknown `method`, a numeraire that is neither three upper-case
+letters nor declared, or a declared numeraire that does not bind its source
+artifact makes `verify_artifact` raise `ValueError`, as `build_artifact` does.
 
 ## Input domain
 
@@ -196,6 +286,15 @@ non-negative population data (UN WPP) with positive totals, so this tightening
 changes **no** published artifact and **no** hash — it only narrows the accepted
 input domain at its previously-undefined edge.
 
+The **numeraire** is validated too (format `worldyard-artifact-3`): it must be
+a string of exactly three upper-case ASCII letters (`"USD"` if absent), or a
+declared fictional identifier with a conversion that binds its source artifact
+(§4.4). Earlier versions accepted any value, including `"W"` with no
+declaration and the number `12345`. Every published vintage has the numeraire
+`"USD"`, so this narrowing also changes no published artifact and no hash. The
+rule checks a shape only: an invented three-letter code used without saying so
+cannot be detected.
+
 ## Data states and fallbacks
 
 Worldyard never guesses an input. Before a vintage is built, every input — an FX
@@ -209,7 +308,7 @@ Resolution happens **before** the engine runs. `build_artifact` is unchanged and
 still takes only resolved numbers, so these rules change no shipped spec,
 artifact or hash. The reference implementation is `worldyard.resolve_input`
 (pure: no I/O, no clock, independent of the order of the observations; tested by
-`test_fallbacks.py`).
+`test_fallbacks.py`, and by `test_changeover.py` for rule 0).
 
 Scope, stated plainly: these rules make the *treatment* of gaps reproducible and
 visible. They do not make a carried-forward or converted number economically
@@ -230,6 +329,15 @@ never interpolated or averaged, and no undeclared source is substituted.
 
 ### Rules, in order (the first that applies decides)
 
+0. **Whole-basket successor event (hypothetical scenarios only).** If the
+   caller supplies such an event (`changeover`, see "Whole-basket successor
+   event" below) and the target is on or after its `effective` date →
+   `unavailable` (`FX_LEG_FROZEN_AT_CHANGEOVER`), for every series. The rule
+   is applied after the arguments have been validated and before every other
+   rule: it takes precedence over a per-series `fixed_conversion` (whatever
+   its date), permanent holes, suspension, retirement and observations.
+   Without an event, and for targets before its date, rules 1–7 apply exactly
+   as before.
 1. **Extinct currency, fixed conversion.** If the series declares
    `fixed_conversion` and the target is on or after its `effective` date, the
    value is the successor's resolved value divided by `units_per_successor`;
@@ -331,6 +439,245 @@ rates on their exact dates (`ok`) and population and PPP inputs `stale` by the
 ages given above. `v0.4-ppp-unwpp` records its resolution explicitly
 (`provenance.input_states`, computed with `resolve_input`).
 
+## Whole-basket successor event (hypothetical scenarios only)
+
+> A thought experiment: what would this unit of account need if **every**
+> currency of its basket, the numeraire included, were converted into one
+> successor unit on one date? **"W" below is a fictional scenario identifier,
+> not a currency code.** This section is not a forecast, not a proposal or an
+> offer of any currency, and not a claim of regulatory compliance.
+
+The per-series `fixed_conversion` rule covers one currency joining another
+(the lev joining the euro). It cannot express the whole basket: each series
+would need a successor series "numeraire per successor unit", which cannot
+exist once the numeraire itself is converted. Every input would then end
+`unavailable` with `SUCCESSOR_UNAVAILABLE:NO_OBSERVATION`. That is safe, but
+the reason is wrong: nothing is missing, the FX leg has ended. The event
+states that case directly:
+
+```json
+{
+  "event": "whole_basket_successor",
+  "id": "hypothetical-W-test-1",
+  "scenario": "hypothetical",
+  "successor": "W",
+  "successor_kind": "fictional_scenario_identifier",
+  "effective": "2100-01-01",
+  "units_per_successor": {"USD": "1.25", "EUR": "1", "CNY": "10",
+                          "JPY": "200", "GBP": "0.8", "INR": "100"}
+}
+```
+
+Every number and the date in this example are invented. The object is
+validated strictly; a malformed event is an error (`ValueError`), never a
+silent pass. The byte-level rules are in `ARTIFACT_FORMAT.md` §10.
+
+- **Hypothetical only.** `scenario` must be `"hypothetical"`,
+  `successor_kind` must be `"fictional_scenario_identifier"`, and `successor`
+  must be a fictional identifier (§4.4), which can never have the shape of a
+  currency code. Nothing else is accepted in this version. Worldyard cannot
+  authenticate a declaration: the optional `declaration` object may carry an
+  authority's wording or the hash of its document, and that binds the text to
+  the event's hash; it does not show that the text is genuine.
+- **Direction.** `units_per_successor[code]` is the number of units of the old
+  currency equal to **one** unit of the successor, the direction of the
+  per-series rule (BGN 1.95583 = EUR 1). Each rate is a plain decimal string
+  (`ARTIFACT_FORMAT.md` §1.1), kept verbatim; amounts in old units are divided
+  by it. The library never forms an inverse rate, and a declaration made in
+  the other direction cannot be expressed: it is neither accepted nor
+  inverted. (The euro's own rules took the same line: "Inverse rates derived
+  from the conversion rates shall not be used", Council Regulation (EC) No
+  1103/97, Article 4(3),
+  <https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:31997R1103>,
+  read 2026-11-17.)
+- **`effective`** is a civil date `YYYY-MM-DD` in the proleptic Gregorian
+  calendar, like every date here, and it is the first date on which the event
+  applies: a target is before the event if and only if it is earlier than
+  `effective`. There is no time of day and no time zone. The date is taken as
+  written in the declaration, and an observation belongs to the date its
+  publisher gives it. If a publisher's dating convention could put an
+  observation on the wrong side of the boundary, the publisher of the vintage
+  decides and says so in its `SOURCES.md`; the library does not model it.
+- **Effect on inputs: rule 0.** With the event supplied, an FX-leg input (an
+  exchange rate of a basket currency against the numeraire) on or after
+  `effective` resolves to `unavailable` with the reason
+  `FX_LEG_FROZEN_AT_CHANGEOVER`. There is no new state. A state that carried a
+  value would have to be an exchange rate between two old currencies derived
+  from the declared rates, which the euro precedent declined to define ("no
+  inverse rates nor bilateral rates between the currencies of the Member
+  States adopting the euro will be defined", Council Regulation (EC) No
+  2866/98, recital 5,
+  <https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:31998R2866>,
+  read 2026-11-17). A state without a value is `unavailable` under another
+  name. A reason code keeps the contract of this section: every path that
+  does not end in `ok`, `stale` or `fixed_conversion` ends in `unavailable`
+  with a machine-readable reason, and a basket with an unavailable input
+  produces no artifact.
+- **The event is a basket-level fact.** `resolve_input` sees one series at a
+  time, so the caller passes the event for each FX-leg input. It is not passed
+  for population or PPP inputs, which are not exchange rates of a converting
+  currency. A succession of some currencies only stays under the per-series
+  rule.
+
+### The frozen record
+
+After the event every pinned quantity is a fixed amount of the successor unit,
+so the value of the basket in that unit no longer moves. A **frozen record**
+(format `worldyard-frozen-record-1`, `ARTIFACT_FORMAT.md` §11) states it:
+
+```
+final_value = R50( Σ_i  fixed_amount_i / units_per_successor[code_i] )
+```
+
+`worldyard.freeze_fx_leg(spec, event, valuation_date)` builds the record from
+the last FX-leg spec before the event.
+
+- **Exact, rounded once.** The quantities are the published `fixed_amount`
+  strings. Each is divided by its declared rate, the quotients are added
+  exactly, and the sum is rounded once to 50 significant digits, ties to even.
+  Rounding each term first would make the result depend on the order of the
+  basket: on the quantities of `v0.3-unwpp` with awkward rates the two
+  procedures differ in the last digit (`…905565` against `…905566`,
+  `test_changeover.py`). No inverse rate is formed, and nothing is rounded to
+  a sub-unit: the record is a measurement, not an amount to be paid.
+- **Coverage.** The event must declare a rate for exactly the codes of the
+  basket. A missing code and a code outside the basket are both errors.
+- **The valuation date is required and must be before `effective`.** It is a
+  declaration: the engine reads no dates when it builds an artifact, so it
+  checks the order of the two dates and nothing more. That the spec's
+  valuation rates are the observations of that date is the publisher's
+  statement in `SOURCES.md`, as for every vintage; hence the field name
+  `declared_valuation_date`.
+- **Which value is the value of the unit after the event:** `final_value`. It
+  is fixed by the pinned quantities and the declared rates alone.
+- **The gap to the last market value is reported, as information only.** The
+  record's `comparison` block restates the last value of the FX leg through
+  the declared rate of the old numeraire (the same number a declared numeraire
+  gives, §4.4) and shows `final_value` minus that. In the example above the
+  last value 0.92453125 USD reads 0.739625 W at 1.25 USD per W, while
+  `final_value` is 0.800625 W: the declared rates of two currencies are not
+  proportional to their last market rates. The restated number depends on
+  which currency is used as the bridge, which is why it is only information.
+  When the old numeraire has no declared rate the block is `null` and the
+  record is flagged `NO_BRIDGE_RATE`.
+- **Refused** (`ValueError`, no record): an event without rates (a fresh start
+  that voids or re-allocates balances is not a successor event; a series that
+  simply stops is `retired_since`, `SOURCE_RETIRED`); a spec with a declared
+  numeraire (freeze its source spec); a PPP-valued spec (§2.3), whose value is
+  in international dollars and not an amount of a converting currency; basket
+  codes that are not strings; a negative quantity or one outside the supported
+  range.
+- **What the record binds** and what it does not show are listed in
+  `ARTIFACT_FORMAT.md` §11. Binding the hash of an event does not authenticate
+  the declaration behind it.
+
+The independent verifier recomputes a record with its own code
+(`verify_independent.compare_frozen_record`). No shipped vintage has a frozen
+record: `data/` holds real vintages only, and the examples and tests of this
+section use invented inputs.
+
+### The PPP valuation leg at the event
+
+A PPP-valued vintage (§2.3; `v0.2-ppp` and `v0.4-ppp-unwpp`) is not frozen,
+not continued and not re-denominated by this library: `freeze_fx_leg`,
+`redenominate` and a declared numeraire refuse it (`ValueError`). Its value is
+in international dollars, not an amount of any currency that a declared rate
+converts, and a PPP factor is not an exchange rate. Calling such a value "the
+last FX-leg value", or giving it the numeraire `"W"`, would be false.
+
+- **Resolving inputs.** Populations and PPP factors are not FX-leg inputs, so
+  they are resolved **without** the event (no `changeover`). The resolver
+  cannot tell what a series measures: with the event supplied it refuses
+  every input on or after the date, so the caller must pass the event for
+  FX-leg inputs only. A PPP factor observed before the event stays usable
+  with the old-unit quantities within its maximum age (1096 days from 1 July
+  of its reference year) and is `TOO_OLD` after that.
+- **A factor restated in the successor unit is not defined in this version.**
+  A factor is quoted in local units per international dollar, so carrying a
+  factor stated in successor units back to old units would need a
+  multiplication by the declared rate. The per-series `fixed_conversion` rule
+  divides by `units_per_successor`, which is right for a rate quoted as
+  numeraire per unit (here the PPP-implied international dollars per unit,
+  `1 / factor`) and wrong for the factor as published: a factor of 0.4
+  successor units per international dollar at 10 old units per successor
+  would resolve to 0.04 instead of 4. Whether such series would ever exist is
+  unknowable, and a purchasing-power reading in the successor unit would be
+  a new, separately named methodology.
+- **The basket of a PPP vintage can still be valued at the declared rates,
+  through a nominal sibling.** The pinned quantities depend only on
+  populations, multipliers and the baseline rates, not on the valuation leg.
+  A nominal spec with the same basket and the same baseline rates pins the
+  same quantities and can be frozen (`test_changeover.py` checks this on
+  `v0.4-ppp-unwpp`). Its frozen record states the declared-rate value of the
+  same basket; it says nothing about purchasing power.
+- **Limit.** A PPP-valued spec is recognised exactly as §2.3 describes
+  (every entry records `ppp_factor_lcu_per_intl_usd` and is valued at
+  `1 / factor`). A PPP-valued spec that does not record its factors cannot be
+  recognised, and is treated as an FX-valued one.
+
+### The rate comparison (information only)
+
+`worldyard.rate_comparison(event, market, ppp)` sets the declared rates of an
+event beside pinned market rates (USD per unit) and PPP factors (local
+currency units per international dollar), as ratios. It compares; it does
+not grade. The record has its own format, `worldyard-rate-comparison-1`
+(`ARTIFACT_FORMAT.md` §12). With `u` the event's `units_per_successor`, one
+row per code of the event:
+
+```
+declared_implied_usd_per_unit = R50( u[USD] / u[code] )
+declared_over_market          = R50( u[USD] / u[code] / market[code] )
+declared_over_ppp             = R50( u[USD] / u[code] × factor[code] )
+```
+
+- **The implied column is not a conversion rate.** It is what the declared
+  rates imply for one unit of an old currency in USD, shown for comparison
+  only, and it must not be used to convert amounts. In the euro precedent,
+  "Bilateral conversion rates between national currency units are not defined
+  and cannot be used" (European Commission, "Converting to the euro",
+  <https://economy-finance.ec.europa.eu/euro/enlargement-euro-area/adoption-fixed-euro-conversion-rate/converting-euro_en>,
+  read 2026-11-17). An old amount is converted by its own declared rate,
+  never through another old currency.
+- **A PPP factor is not an exchange rate.** PPPs "should not be interpreted
+  as equilibrium exchange rates" (World Bank, ICP FAQ,
+  <https://www.worldbank.org/en/programs/icp/faq>, read 2026-11-17).
+  `declared_over_ppp` is the price level index (the ratio of a PPP to an
+  exchange rate, United States = 1) computed with the declared-implied rate
+  in place of a market rate. No column shows a correct rate, or that a
+  currency is over- or undervalued.
+- **USD is the anchor**, because every rate field of Worldyard is in USD and
+  the field names say so: the event must declare a rate for USD, the market
+  table's `numeraire` must be `"USD"`, and a USD entry in either table must
+  be 1.
+- **Ratios only.** Each ratio is declared ÷ reference; 1 means that the
+  declared rates imply the reference figure exactly. A percentage would say
+  the same.
+- **Pinned inputs, resolved first.** The two tables hold pinned values, like a
+  spec. Each input is resolved under "Data states and fallbacks" first (an
+  FX-leg input on or after the event's date resolves to
+  `FX_LEG_FROZEN_AT_CHANGEOVER`, so the market table is of an earlier date);
+  an input that resolved `unavailable` is left out of its table, and its row
+  then shows `null` and the flag `NO_MARKET_RATE` or `NO_PPP_FACTOR`, never a
+  guess. The market date, and 1 July of the PPP reference year, must be before
+  `effective`.
+- **Exact, each column rounded once,** from the verbatim strings; no column
+  is computed from another, already rounded one, and no inverse rate is
+  formed.
+- **Not anchored.** The record is self-hashed; anchoring is a separate step.
+  The independent verifier recomputes it with its own code
+  (`verify_independent.compare_rate_comparison`).
+
+The two records are linked when the spec's numeraire is USD and the market
+table holds the spec's valuation rates: the frozen record's `final_value`
+divided by its `last_fx_leg_value_bridged` equals the mean of
+`declared_over_market` weighted by the valuation contributions
+(`fixed_amount` × `fx_valuation_usd_per_unit`) of the source artifact's rows;
+exactly where no value involved was rounded (the example above: 0.800625 /
+0.739625), and to about 50 digits otherwise or with the published, rounded
+`realized_weight_at_valuation` strings. The gap of the frozen record is then
+the basket-weighted effect of the declared rates that are not proportional
+to the market rates.
+
 ## Corrections and supersession
 
 - **Originals are never rewritten.** Once a vintage is published, its
@@ -355,6 +702,35 @@ ages given above. `v0.4-ppp-unwpp` records its resolution explicitly
   corrected successor stays `current` and carries the warning; a superseded
   vintage keeps its warnings. Warnings can also describe a current vintage's
   known limits (e.g. `PPP_EXTRAPOLATED` on `v0.4-ppp-unwpp`).
+- **A frozen record would be a structured warning (hypothetical scenarios
+  only).** No shipped vintage has a frozen record and `data/vintages.json`
+  holds none: "W" is a fictional scenario identifier, and a hypothetical
+  entry on a real vintage would be a false statement about it. If a
+  whole-basket successor event were ever recorded, its frozen record would
+  enter the registry as one warning on the entry of its source vintage,
+  which the append-only rule already allows, with no change of the registry
+  format:
+
+  ```json
+  {"code": "FX_LEG_FROZEN_AT_CHANGEOVER", "detail": "<text>",
+   "scenario": "…", "event_id": "…", "event_hash": "sha256:…",
+   "effective": "YYYY-MM-DD", "record_hash": "sha256:…",
+   "event_file": "data/<vintage>/<file>", "record_file": "data/<vintage>/<file>"}
+  ```
+
+  The event and the record are new files in the vintage's directory; the
+  vintage's own three files stay byte-identical, and `status` keeps
+  describing supersession only. `test_vintages.py` checks every such warning:
+  exactly these nine keys, each a non-empty string; at most one per event id;
+  both files directly inside the vintage's directory and neither of them one
+  of its own files; the record's `record_hash`, `scenario`, `event_id`,
+  `event_hash` and `effective` equal to the warning's; its
+  `source_artifact_hash` equal to the entry's `artifact_hash`; and the
+  independent verifier reproducing the record from the vintage's spec and
+  the event. "The last vintage before the event" is this registry statement,
+  made by whoever records it; the engine cannot know it. A PPP-valued
+  vintage gets no frozen record (see "Whole-basket successor event"); an
+  ordinary warning (code and detail) would say so.
 
 ## 6. Reference vintages
 
@@ -447,8 +823,9 @@ outside the commitment. Full model: [`docs/ANCHORING.md`](docs/ANCHORING.md).
   member when checked on 2026-06-10 (`docs/AUDIT.md`). Those 2024 values are
   not ICP benchmark values: the next ICP benchmark, ICP 2024, has not been
   released, and WDI will replace its extrapolations when it is.
-- ✅ A published-artifact **format standard** (`openunit-artifact-1`, now
-  `worldyard-artifact-2`, see `ARTIFACT_FORMAT.md` §9) and a **minimal
+- ✅ A published-artifact **format standard** (`openunit-artifact-1`, then
+  `worldyard-artifact-2`, now `worldyard-artifact-3`, see `ARTIFACT_FORMAT.md`
+  §9) and a **minimal
   third-party verifier** (`verify_independent.py`, engine-free, stdlib-only).
 - ✅ **Public timestamping** for anchors: the published vintages (v0.1, v0.2) carry
   OpenTimestamps proofs confirmed in the Bitcoin blockchain

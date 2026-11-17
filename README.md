@@ -243,13 +243,46 @@ every shipped vintage with `make verify-independent` (also part of
 `make verify` and CI). If the engine were ever wrong or tampered with, this is
 the program that would say so.
 
+## Hypothetical scenarios (experimental)
+
+Hypothetical-scenario helpers (a whole-basket successor event, a frozen
+record, a declared numeraire, a rate comparison) are experimental. "W" in
+the examples and tests is a fictional scenario identifier. They are not
+forecasts or proposals, and Worldyard does not issue currency or tokens,
+accept deposits, settle or redeem anything, recommend financial decisions,
+or certify regulatory compliance. A rate comparison is information only; a
+PPP factor is not an exchange rate. Successful verification shows only that
+a record reproduces from its inputs, not that a declared rate is authentic,
+right or fair.
+
+The rules are in `SPEC.md` ("Whole-basket successor event") and
+`ARTIFACT_FORMAT.md` (§1.1, §4.1, §6.1, §10–§12); the reasons are in
+`docs/hypothetical/W_CHANGEOVER_DESIGN.md`. The independent verifier
+checks both records from the command line:
+
+```sh
+python3 verify_independent.py spec.json artifact.json \
+    --event event.json --frozen-record frozen.json
+python3 verify_independent.py spec.json artifact.json \
+    --event event.json --market market.json --ppp ppp.json \
+    --rate-comparison comparison.json
+```
+
+Exit 0 means every requested check passed; 1 lists the differing fields;
+2 is an operational error (an unreadable or malformed file, a repeated JSON
+key, a flag without the flags it needs). No shipped vintage has a frozen
+record; `data/` holds real vintages only.
+
 ## Determinism properties
 
 - **Standard library only** (`json`, `hashlib`, `decimal`).
 - **Exact arithmetic** with `decimal.Decimal`, precision **50**, rounding
-  **ROUND_HALF_EVEN**, inside an isolated `localcontext` (the caller's global
-  decimal context is never modified). All numeric inputs are parsed from
-  **strings**, never from floats.
+  **ROUND_HALF_EVEN**, inside an isolated, fully specified decimal context:
+  nothing is taken from the caller's context (not the exponent letter, the
+  exponent limits or the traps), and the caller's context is never modified.
+  The numbers of the hypothetical-scenario records are exact rationals rounded
+  once to 50 significant digits, ties to even (`ARTIFACT_FORMAT.md` §1.1).
+  All numeric inputs are parsed from **strings**, never from floats.
 - **No wall clock.** The engine never imports or calls `datetime`/`time`; the
   result depends only on the inputs, never on when it runs. (`test_determinism_guard.py`
   enforces this by source scan *and* by poisoning `time.*` at runtime.)
@@ -270,12 +303,15 @@ be attached later without changing any hash. See `docs/ANCHORING.md`.
 ## Project layout
 
 ```
-worldyard.py                engine: build_artifact / verify_artifact / resolve_input (+ demo)
+worldyard.py                engine: build_artifact / verify_artifact / resolve_input (+ demo);
+                            experimental hypothetical-scenario helpers: redenominate,
+                            artifact_value, freeze_fx_leg, rate_comparison
 openunit.py                 deprecated alias: `import openunit` returns the worldyard module
 cli.py                      command-line interface
 anchor.py                   tamper-evident anchoring (offline hash-chain)
 make_vintages.py            regenerate / --verify the pinned data vintages
-verify_independent.py       independent second-implementation verifier (no engine import)
+verify_independent.py       independent second-implementation verifier (no engine import);
+                            also recomputes frozen records and rate comparisons
 sample_input.json           illustrative v0 spec (non-authoritative)
 data/
   v0.1-2026-05-15/          REAL vintage: spec.json, artifact.json, SOURCES.md
@@ -294,9 +330,12 @@ test_independent.py         engine × independent-verifier cross-validation
 test_properties.py          randomized property / edge / tamper tests (fixed seed)
 test_fallbacks.py           data states and fallbacks (stale, suspended, fixed conversion, ...)
 test_compat.py              the rename: openunit alias, method names, old vintages unchanged
+test_changeover.py          hypothetical changeover: declared numeraire, successor event,
+                            frozen record, rate comparison (standalone + pytest)
 SPEC.md                     specification
 ARTIFACT_FORMAT.md          byte-level spec.json / artifact.json format
 docs/ANCHORING.md           anchoring model and external timestamping
+docs/hypothetical/          W_CHANGEOVER_DESIGN.md: design notes for the hypothetical changeover
 ```
 
 ## On "fairness"

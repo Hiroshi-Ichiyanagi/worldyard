@@ -25,9 +25,21 @@ import worldyard
 import anchor as anchor_mod
 
 
+def _object_without_repeated_keys(pairs):
+    """A JSON object with a repeated key is not a valid spec, artifact or
+    anchor record (ARTIFACT_FORMAT.md section 2): Python would keep the last
+    value and another reader may keep the first. Refuse it."""
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError("an object has the key %r twice" % (key,))
+        obj[key] = value
+    return obj
+
+
 def _load(path):
     with open(path, "r", encoding="utf-8") as fh:
-        return json.load(fh)
+        return json.load(fh, object_pairs_hook=_object_without_repeated_keys)
 
 
 def _dump(obj, path=None):
@@ -47,7 +59,7 @@ def cmd_build(args):
         return 1
     _dump(art, args.output)
     if args.output:
-        v = Decimal(art["value_usd"]).quantize(Decimal("0.000001"))
+        v = Decimal(worldyard.artifact_value(art)).quantize(Decimal("0.000001"))
         print("built %s  ->  1 %s = %s %s"
               % (args.output, art["method"], v,
                  worldyard.display_unit(art, spec)))
@@ -65,7 +77,7 @@ def cmd_verify(args):
 
 def cmd_show(args):
     art = _load(args.artifact)
-    v = Decimal(art["value_usd"]).quantize(Decimal("0.000001"))
+    v = Decimal(worldyard.artifact_value(art)).quantize(Decimal("0.000001"))
     print("method        : %s %s" % (art["method"], art["method_version"]))
     print("1 unit        : %s %s" % (v, worldyard.display_unit(art)))
     print("weight basis  : %s" % art["weight_basis"])

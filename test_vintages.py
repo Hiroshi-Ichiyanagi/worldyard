@@ -7,7 +7,9 @@ the v0.1 nominal FX must be the exact quotient of the raw ECB rates, published
 vintage files must stay byte-identical, v0.3-unwpp must be exactly the UN
 extract on v0.1's FX, v0.4-ppp-unwpp must be v0.3's populations on v0.2's FX
 with the pinned World Bank PPP response, and the vintage registry
-(data/vintages.json) must be consistent with the specs it describes.
+(data/vintages.json) must be consistent with the specs it describes,
+including the rule for a frozen record of a hypothetical scenario (none is
+shipped).
 
 Standalone (`python3 test_vintages.py`) and pytest compatible.
 """
@@ -19,6 +21,7 @@ import hashlib
 from decimal import Decimal, localcontext, ROUND_HALF_EVEN
 
 import worldyard
+import verify_independent   # engine-free: checks frozen records in the registry
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -352,6 +355,78 @@ def test_vintage_registry_is_consistent():
             assert vid in entries[new]["supersedes"], (vid, new)
         for w in e["warnings"]:
             assert w["code"] == w["code"].upper() and w["detail"], vid
+        check_frozen_warnings(e, spec, _repo_json, "data/" + vid)
+
+
+# --- frozen records in the registry (SPEC.md, "Corrections and supersession") --
+# HYPOTHETICAL SCENARIOS ONLY. No shipped vintage has a frozen record ("W" in
+# the tests is a fictional scenario identifier), so the shipped registry has
+# no such warning. The rule below is what a frozen record would have to
+# satisfy if a whole-basket successor event were ever recorded; it is
+# exercised in test_changeover.py on an entry built there.
+FROZEN_WARNING_CODE = "FX_LEG_FROZEN_AT_CHANGEOVER"
+FROZEN_WARNING_KEYS = ("code", "detail", "scenario", "event_id", "event_hash",
+                       "effective", "record_hash", "event_file", "record_file")
+VINTAGE_OWN_FILES = ("spec.json", "artifact.json", "SOURCES.md")
+
+
+def _repo_json(path):
+    """The parsed JSON file at a repository-relative path."""
+    return _load(os.path.join(HERE, *path.split("/")))
+
+
+def check_frozen_warnings(entry, spec, load, directory=None):
+    """Check every FX_LEG_FROZEN_AT_CHANGEOVER warning of one registry entry
+    and return how many it has. `load(path)` returns the parsed JSON file at
+    a repository-relative path. With `directory` (e.g. "data/<id>"), both
+    files must be new files directly inside it. Raises AssertionError on any
+    inconsistency.
+
+    A frozen record enters the registry as a structured warning on the entry
+    of its source vintage: the append-only rule (an existing entry may only
+    gain superseded_by links and warnings) and the registry format stay as
+    they are, the vintage's own files stay byte-identical, and `status` keeps
+    describing supersession only."""
+    seen = set()
+    count = 0
+    for w in entry["warnings"]:
+        if w.get("code") != FROZEN_WARNING_CODE:
+            continue
+        count += 1
+        assert sorted(w) == sorted(FROZEN_WARNING_KEYS), \
+            (entry["id"], "frozen warning keys", sorted(w))
+        for key in FROZEN_WARNING_KEYS:
+            assert isinstance(w[key], str) and w[key], (entry["id"], key)
+        assert w["event_id"] not in seen, \
+            (entry["id"], "two frozen warnings for one event", w["event_id"])
+        seen.add(w["event_id"])
+        for key in ("event_file", "record_file"):
+            path = w[key]
+            parts = path.split("/")
+            assert not path.startswith("/") and "\\" not in path \
+                and "" not in parts and "." not in parts \
+                and ".." not in parts, (entry["id"], key, path)
+            if directory is not None:
+                assert "/".join(parts[:-1]) == directory, \
+                    (entry["id"], key, "not in the vintage's directory", path)
+                assert parts[-1] not in VINTAGE_OWN_FILES, \
+                    (entry["id"], key, "one of the vintage's own files", path)
+        assert w["event_file"] != w["record_file"], entry["id"]
+        event = load(w["event_file"])
+        record = load(w["record_file"])
+        assert isinstance(record, dict), (entry["id"], "record")
+        assert record.get("record_hash") == w["record_hash"], entry["id"]
+        assert record.get("source_artifact_hash") == entry["artifact_hash"], \
+            (entry["id"], "the record is not of this vintage's artifact")
+        for key in ("scenario", "event_id", "event_hash", "effective"):
+            assert record.get(key) == w[key], (entry["id"], key)
+        try:
+            diffs = verify_independent.compare_frozen_record(spec, event,
+                                                             record)
+        except ValueError as exc:
+            raise AssertionError((entry["id"], "event or spec refused", exc))
+        assert diffs == [], (entry["id"], diffs)
+    return count
 
 
 def _run():

@@ -10,6 +10,7 @@ import os
 import io
 import json
 import tempfile
+from decimal import Decimal
 from contextlib import redirect_stdout
 
 import cli
@@ -121,6 +122,39 @@ def test_display_unit_needs_a_ppp_valuation_leg():
         e["fx_valuation_usd_per_unit"] = "0.5"
     assert worldyard._ppp_valued(spec)
     assert verify_independent.is_ppp_valued(spec)
+
+
+def test_declared_numeraire_artifacts_build_show_and_verify():
+    """Hypothetical scenarios only: an artifact with a declared numeraire
+    (here "W", a fictional scenario identifier) has `value` instead of
+    `value_usd`. `build`, `show` and `verify` handle it, and print the unit
+    as "W (fictional scenario identifier, not a currency)" (display only)."""
+    art = worldyard.build_artifact(SPEC)
+    declaration = {"code": "W", "kind": "fictional_scenario_identifier",
+                   "scenario": "hypothetical"}
+    spec_w = worldyard.redenominate(SPEC, art, declaration, "1.25")
+    art_w = worldyard.build_artifact(spec_w)
+    assert "value_usd" not in art_w
+    unit = "W (fictional scenario identifier, not a currency)"
+    assert worldyard.display_unit(art_w) == unit
+    assert worldyard.display_unit(art_w, spec_w) == unit
+    shown_value = str(Decimal(art_w["value"]).quantize(Decimal("0.000001")))
+    with tempfile.TemporaryDirectory() as d:
+        spec_p = _write(d, "spec.json", spec_w)
+        art_p = os.path.join(d, "artifact.json")
+        built = _out(["build", spec_p, "-o", art_p])
+        with open(art_p, "r", encoding="utf-8") as fh:
+            assert json.load(fh) == art_w
+        assert ("1 %s = %s %s" % (art_w["method"], shown_value, unit)) \
+            in built
+        shown = _out(["show", art_p])
+        assert ("1 unit        : %s %s" % (shown_value, unit)) in shown
+        assert art_w["artifact_hash"] in shown
+        assert "VERIFIED" in _out(["verify", art_p, spec_p])
+    # the source artifact still prints in USD
+    assert worldyard.display_unit(art) == "USD"
+    assert worldyard.artifact_value(art) == art["value_usd"]
+    assert worldyard.artifact_value(art_w) == art_w["value"]
 
 
 def test_anchor_roundtrip():
