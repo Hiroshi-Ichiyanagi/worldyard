@@ -5,6 +5,95 @@ format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Worldyard is a specification plus a reference implementation; "versions" here refer to **method
 versions** (the `method_version` field) and to releases of this repository.
 
+## [Unreleased]
+
+Experimental helpers for a **hypothetical scenario**, a thought experiment:
+every currency of the basket is converted into one successor unit on one
+date. **"W" in the examples and tests is a fictional scenario identifier, not
+a currency code.** Nothing here is a forecast, a proposal or an offer of any
+currency, and nothing claims regulatory compliance. A successful verification
+shows only that a record reproduces from its inputs, not that a declared rate
+is authentic, right or fair. Design notes:
+`docs/hypothetical/W_CHANGEOVER_DESIGN.md`. No shipped spec, artifact, hash
+or registry entry changes; there is no package version bump and no new
+method version.
+
+### Added
+
+- **Format standard `worldyard-artifact-3`** (`ARTIFACT_FORMAT.md`). A
+  numeraire can be **declared** as a fictional scenario identifier (1 to 16
+  ASCII letters and digits, never exactly three letters), hypothetical
+  scenarios only: the artifact restates the two values of its source artifact
+  (`baseline_value`, `value`), each divided once by the declared rate, and
+  keeps every basket row; the spec binds the source artifact by its two
+  hashes. `worldyard.redenominate(spec, artifact, declaration,
+  units_of_old_per_new)` makes such a spec; `worldyard.artifact_value(artifact)`
+  reads the value of either kind of artifact. Every `-2` artifact whose
+  numeraire is three upper-case letters, or absent (every shipped vintage), is
+  a `-3` artifact with the same bytes.
+- **Whole-basket successor event** (`ARTIFACT_FORMAT.md` §10, `SPEC.md`):
+  `resolve_input(target, series, max_age_days=0, rate_type=None,
+  changeover=None)`. With an event, an FX-leg input on or after its
+  `effective` date resolves to `unavailable` with the new reason
+  `FX_LEG_FROZEN_AT_CHANGEOVER` (rule 0, before every per-series rule).
+  Without an event, nothing changes.
+- **Frozen record** `worldyard-frozen-record-1` (§11):
+  `worldyard.freeze_fx_leg(spec, event, valuation_date)`. `final_value` is the
+  pinned quantities divided by the declared rates, an exact sum rounded once;
+  an information-only `comparison` block restates the last market value
+  through the declared rate of the old numeraire and reports the gap. An
+  event whose free-form `declaration` holds NaN or an infinity is refused
+  (numbers there are hashed as Python's `json` writes them; give them as
+  strings).
+- **Rate comparison** `worldyard-rate-comparison-1` (§12), information only:
+  `worldyard.rate_comparison(event, market, ppp)`. Ratios of the
+  declared-implied rate to pinned market rates and PPP factors; the implied
+  column is not a conversion rate, and a PPP factor is not an exchange rate.
+- `verify_independent.py` recomputes both records with its own code
+  (`recompute_frozen_record`, `compare_frozen_record`,
+  `recompute_rate_comparison`, `compare_rate_comparison`; exact values with
+  `fractions`), and checks them from the command line with the new flags
+  `--event`, `--frozen-record`, `--market`, `--ppp` and `--rate-comparison`.
+  Without flags its output is unchanged.
+- The rule for a frozen record in `data/vintages.json` (`SPEC.md`,
+  "Corrections and supersession"): a structured warning
+  `FX_LEG_FROZEN_AT_CHANGEOVER` on the source vintage's entry, checked by
+  `test_vintages.check_frozen_warnings`. The shipped registry has no such
+  warning (no shipped vintage is frozen).
+- `test_changeover.py` (standalone and pytest), run by `make verify` and by
+  the CI step without pytest.
+
+### Changed
+
+- **One fully specified decimal context** in the engine and in the
+  independent verifier (precision 50, ties to even, every other field
+  stated), so a caller's own decimal context no longer changes a byte or
+  makes a shipped vintage unbuildable. No shipped byte changes.
+- **Numeraire rule (a breaking narrowing of the input domain):** a spec whose
+  numeraire is not declared must use exactly three upper-case ASCII letters.
+  A `-2` spec with another value or a non-string (for example `"USDT"`,
+  `"usd"`, `""` or `12345`), which release 0.4.0 built, is not a `-3` spec:
+  this engine and this verifier refuse it. Its `-2` artifact still verifies
+  with the 0.4.0 verifier. Every shipped vintage uses `"USD"` and is
+  unaffected.
+- **A JSON file in which an object has a repeated key is refused** by
+  `verify_independent.py` (exit 2) and by the CLI (exit 1). Release 0.4.0
+  kept the last of the repeated values without a word, so a file whose first
+  value was edited still verified, while a reader that keeps the first value
+  saw the edited one. No shipped file has a repeated key.
+- `verify_independent.py` ends a malformed input (a spec or artifact file
+  holding a list, a population that is not a number, nesting too deep to
+  read) with exit 2 and one `ERROR` line instead of a traceback, and shows a
+  difference nested too deeply to print as a placeholder.
+- The numbers of the new objects are **declared numbers**: plain decimal
+  strings (ASCII digits and at most one `.`, no sign, exponent or spaces).
+  Older spec fields keep their looser form.
+- `cli.py build` and `show` handle an artifact with a declared numeraire; the
+  CLI, the demo and the verifier print its unit as "W (fictional scenario
+  identifier, not a currency)" (display only).
+- PPP-valued vintages are not frozen or re-denominated; `SPEC.md` states how
+  their inputs are resolved at such an event.
+
 ## [0.4.0] — 2026-10-26
 
 ### Renamed: openunit is now Worldyard
